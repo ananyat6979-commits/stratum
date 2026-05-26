@@ -1,0 +1,10 @@
+[project]
+name = "stratum-cache-oracle"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.136.3",
+    "numpy>=2.2.6",
+    "prometheus-client>=0.25.0",
+    "uvicorn>=0.48.0",
+]

@@ -1,0 +1,17 @@
+# Rust
+target/
+Cargo.lock   # keep this for binaries, remove for libs — leave for now
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+.mypy_cache/
+
+# Go
+vendor/
+
+# OS
+.DS_Store
+Thumbs.db

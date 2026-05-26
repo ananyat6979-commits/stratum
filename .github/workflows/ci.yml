@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "phase/*"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-check:
+    name: Rust — Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Tests (with nextest for parallelism)
+        run: cargo nextest run --all-features
+      - name: Doc tests
+        run: cargo test --doc
+
+  rust-benchmarks:
+    name: Rust — Benchmark Regression Gate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history for baseline comparison
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run benchmarks
+        run: cargo bench --all -- --output-format bencher | tee bench-output.txt
+      - name: Check regression (>10% threshold)
+        run: python scripts/benchmark/check_regression.py bench-output.txt
+
+  python-check:
+    name: Python — Lint & Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [cache-oracle, experiment-engine, eval-fabric, synthgen, reliability-model]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v2
+      - name: Install dependencies
+        run: uv sync --dev
+        working-directory: services/${{ matrix.service }}
+      - name: Ruff lint
+        run: uv run ruff check .
+        working-directory: services/${{ matrix.service }}
+      - name: Mypy (strict mode)
+        run: uv run mypy --strict src/
+        working-directory: services/${{ matrix.service }}
+      - name: Pytest
+        run: uv run pytest tests/ -v --tb=short --cov=src --cov-report=xml
+        working-directory: services/${{ matrix.service }}
+
+  go-check:
+    name: Go — Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: services/causal-observer/go.sum
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v3
+        with:
+          working-directory: services/causal-observer
+      - name: Tests
+        run: go test ./... -race -count=1
+        working-directory: services/causal-observer
+
+  proto-check:
+    name: Protobuf — Lint & Breaking Change Detection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: bufbuild/buf-setup-action@v1
+      - name: Lint
+        run: buf lint
+        working-directory: protos/
+      - name: Breaking change detection
+        run: buf breaking --against '.git#branch=main'
+        working-directory: protos/

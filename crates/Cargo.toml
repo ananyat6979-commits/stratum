@@ -1,0 +1,11 @@
+# crates/Cargo.toml
+[workspace]
+resolver = "2"
+members = [
+    "stratum-gateway",
+    "stratum-router",
+    "stratum-scheduler",
+    "stratum-replay",
+    "stratum-chaos",
+    "stratum-raft",
+]

@@ -1,0 +1,141 @@
+
+version: "3.9"
+
+x-logging: &default-logging
+  driver: loki
+  options:
+    loki-url: "http://loki:3100/loki/api/v1/push"
+    loki-pipeline-stages: |
+      - json:
+          expressions:
+            level: level
+            service: service
+            trace_id: trace_id
+      - labels:
+          level:
+          service:
+          trace_id:
+
+services:
+  # ── Inference Workers ──────────────────────────────────────────
+  worker-0:
+    image: ollama/ollama:latest
+    environment:
+      OLLAMA_HOST: "0.0.0.0:11434"
+      OLLAMA_MODELS: "/models"
+    volumes:
+      - ollama-models:/models
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    logging: *default-logging
+
+  worker-1:
+    image: ollama/ollama:latest
+    environment:
+      OLLAMA_HOST: "0.0.0.0:11434"
+      OLLAMA_MODELS: "/models"
+    volumes:
+      - ollama-models:/models
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    logging: *default-logging
+
+  # ── Observability Stack ────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    volumes:
+      - ./../../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./../../observability/prometheus/rules:/etc/prometheus/rules
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "stratum"
+      GF_FEATURE_TOGGLES_ENABLE: "publicDashboards"
+    volumes:
+      - ./../../observability/grafana/dashboards:/var/lib/grafana/dashboards
+      - ./../../observability/grafana/datasources:/etc/grafana/provisioning/datasources
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.52
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # UI
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+
+  loki:
+    image: grafana/loki:2.9.0
+    volumes:
+      - ./../../observability/loki/config.yml:/etc/loki/config.yml
+      - loki-data:/loki
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.91.0
+    volumes:
+      - ./../../observability/otel/collector.yml:/etc/otel/config.yml
+    command: ["--config=/etc/otel/config.yml"]
+    depends_on:
+      - jaeger
+
+  # ── Data Stores ────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: stratum
+      POSTGRES_USER: stratum
+      POSTGRES_PASSWORD: stratum_dev_only
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./../../scripts/setup/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stratum"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.2-alpine
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+
+volumes:
+  ollama-models:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  postgres-data:
+  redis-data:

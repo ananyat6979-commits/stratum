@@ -1,0 +1,42 @@
+syntax = "proto3";
+package stratum.v1;
+
+option go_package = "github.com/your-org/stratum/gen/go/stratum/v1";
+
+// InferenceRequest is the canonical internal representation of an inference 
+// request. All services communicate via this type, not the OpenAI wire format.
+message InferenceRequest {
+  // replay_key is a deterministic hash over (ingress_timestamp_ns, body_hash, 
+  // ingress_node_id). This is the primary key in the replay event log.
+  // Format: SHA256(timestamp_ns || body_hash || node_id), hex-encoded.
+  string replay_key = 1;
+  
+  // sla_class determines priority queuing and routing weight.
+  SlaClass sla_class = 2;
+  
+  // ingress_timestamp_ns is the wall clock at ingress, preserved for 
+  // causal ordering in replay (not for business logic).
+  int64 ingress_timestamp_ns = 3;
+  
+  // prompt is the raw user prompt. Stored verbatim; tokenization happens 
+  // at the worker, not the gateway.
+  string prompt = 4;
+  
+  // max_tokens requested. Used by scheduler for decode length prediction.
+  int32 max_tokens = 5;
+  
+  // session_id groups requests by user session for cache affinity routing.
+  // Optional — missing session_id disables affinity routing.
+  optional string session_id = 6;
+  
+  // experiment_treatment is set by the router when an experiment is active.
+  // Services downstream should treat this as read-only.
+  optional string experiment_treatment = 7;
+}
+
+enum SlaClass {
+  SLA_CLASS_UNSPECIFIED = 0;
+  SLA_CLASS_REALTIME = 1;    // <100ms TTFT target
+  SLA_CLASS_INTERACTIVE = 2; // <500ms TTFT target
+  SLA_CLASS_BATCH = 3;       // no TTFT SLO; throughput optimized
+}

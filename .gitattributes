@@ -1,0 +1,28 @@
+# Normalize line endings to LF on commit
+* text=auto eol=lf
+
+# Rust
+*.rs text eol=lf
+*.toml text eol=lf
+
+# Python
+*.py text eol=lf
+
+# Go
+*.go text eol=lf
+
+# Protobuf
+*.proto text eol=lf
+
+# YAML/JSON/Markdown
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+
+# Shell
+*.sh text eol=lf
+
+# Windows batch — keep CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf

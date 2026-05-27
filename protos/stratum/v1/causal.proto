@@ -1,0 +1,3 @@
+syntax = "proto3";
+package stratum.v1;
+option go_package = "github.com/stratum-project/stratum/gen/go/stratum/v1";

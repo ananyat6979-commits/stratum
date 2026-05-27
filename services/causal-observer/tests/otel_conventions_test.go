@@ -1,1 +1,1 @@
-package otel_test
+package events_test

@@ -1,7 +1,7 @@
 syntax = "proto3";
 package stratum.v1;
 
-option go_package = "github.com/your-org/stratum/gen/go/stratum/v1";
+option go_package = "github.com/stratum-project/stratum/gen/go/stratum/v1";
 
 // InferenceRequest is the canonical internal representation of an inference 
 // request. All services communicate via this type, not the OpenAI wire format.

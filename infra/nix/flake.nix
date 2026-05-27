@@ -1,4 +1,3 @@
-# infra/nix/flake.nix
 {
   description = "STRATUM development environment";
   inputs = {

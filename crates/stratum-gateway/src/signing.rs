@@ -35,6 +35,7 @@ use sha2::{Digest, Sha256};
 /// ```
 /// use stratum_gateway::signing::compute_replay_key;
 ///
+/// use sha2::Digest;
 /// let body_hash = sha2::Sha256::digest(b"hello world").into();
 /// let key = compute_replay_key(1_700_000_000_000_000_000i64, &body_hash, "node-0");
 /// assert_eq!(key.len(), 64); // hex-encoded SHA-256

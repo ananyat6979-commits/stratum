@@ -1,0 +1,90 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Dependency advisories are published continuously, not just on push.
+    # Weekly scan catches newly-disclosed CVEs in dependencies that were
+    # already in the tree and passed every check at the time they were added.
+    - cron: "0 6 * * 1" # Monday 06:00 UTC
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-audit:
+    name: Rust — cargo audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "crates"
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit dependency tree against RustSec advisory database
+        run: cargo audit
+
+  go-vuln:
+    name: Go — govulncheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/causal-observer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: services/causal-observer/go.sum
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Scan for known vulnerabilities
+        run: govulncheck ./...
+
+  python-audit:
+    name: Python — pip-audit (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - cache-oracle
+          - experiment-engine
+          - eval-fabric
+          - synthgen
+          - reliability-model
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Install pip-audit
+        run: uv pip install pip-audit
+
+      - name: Audit installed dependencies against PyPI advisory database
+        run: uv run pip-audit --strict

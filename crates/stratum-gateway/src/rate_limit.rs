@@ -95,7 +95,10 @@ impl RateLimiter {
     /// Construct a rate limiter with explicit per-class configuration.
     pub fn new(realtime: BucketConfig, interactive: BucketConfig, batch: BucketConfig) -> Self {
         Self {
-            realtime: Mutex::new(TokenBucket::new(realtime.capacity, realtime.refill_rate_per_sec)),
+            realtime: Mutex::new(TokenBucket::new(
+                realtime.capacity,
+                realtime.refill_rate_per_sec,
+            )),
             interactive: Mutex::new(TokenBucket::new(
                 interactive.capacity,
                 interactive.refill_rate_per_sec,
@@ -115,9 +118,18 @@ impl RateLimiter {
     /// These are placeholder defaults pending Phase 1 baseline benchmark data.
     pub fn with_defaults() -> Self {
         Self::new(
-            BucketConfig { capacity: 10.0, refill_rate_per_sec: 10.0 },
-            BucketConfig { capacity: 50.0, refill_rate_per_sec: 50.0 },
-            BucketConfig { capacity: 200.0, refill_rate_per_sec: 100.0 },
+            BucketConfig {
+                capacity: 10.0,
+                refill_rate_per_sec: 10.0,
+            },
+            BucketConfig {
+                capacity: 50.0,
+                refill_rate_per_sec: 50.0,
+            },
+            BucketConfig {
+                capacity: 200.0,
+                refill_rate_per_sec: 100.0,
+            },
         )
     }
 
@@ -154,9 +166,18 @@ mod tests {
     /// to keep tests fast without sleeping for real-world durations.
     fn small_limiter() -> RateLimiter {
         RateLimiter::new(
-            BucketConfig { capacity: 2.0, refill_rate_per_sec: 100.0 }, // realtime
-            BucketConfig { capacity: 2.0, refill_rate_per_sec: 100.0 }, // interactive
-            BucketConfig { capacity: 2.0, refill_rate_per_sec: 100.0 }, // batch
+            BucketConfig {
+                capacity: 2.0,
+                refill_rate_per_sec: 100.0,
+            }, // realtime
+            BucketConfig {
+                capacity: 2.0,
+                refill_rate_per_sec: 100.0,
+            }, // interactive
+            BucketConfig {
+                capacity: 2.0,
+                refill_rate_per_sec: 100.0,
+            }, // batch
         )
     }
 
@@ -242,7 +263,10 @@ mod tests {
         for _ in 0..10 {
             assert!(limiter.check(SlaClass::Realtime));
         }
-        assert!(!limiter.check(SlaClass::Realtime), "realtime should be exhausted after 10 (capacity=10)");
+        assert!(
+            !limiter.check(SlaClass::Realtime),
+            "realtime should be exhausted after 10 (capacity=10)"
+        );
 
         for _ in 0..10 {
             assert!(limiter.check(SlaClass::Batch));

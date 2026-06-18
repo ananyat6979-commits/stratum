@@ -7,8 +7,8 @@
 //! that translation happens — no other code should construct
 //! `InferenceRequest` by hand.
 
-use crate::sla::SlaClass as InternalSlaClass;
 use crate::signing::{compute_replay_key, hash_body};
+use crate::sla::SlaClass as InternalSlaClass;
 
 // Generated proto types live in $OUT_DIR; included once here and
 // re-exported so the rest of the crate can `use crate::proto::InferenceRequest`.
@@ -138,8 +138,14 @@ mod tests {
         let req = OpenAiCompatRequest {
             model: "phi3:mini".to_string(),
             messages: vec![
-                ChatMessage { role: "system".to_string(), content: "be helpful".to_string() },
-                ChatMessage { role: "user".to_string(), content: "hello".to_string() },
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: "be helpful".to_string(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: "hello".to_string(),
+                },
             ],
             max_tokens: 256,
         };
@@ -164,13 +170,8 @@ mod tests {
     #[test]
     fn realtime_auth_header_maps_to_realtime_sla() {
         let req = sample_request();
-        let result = to_inference_request(
-            b"raw body",
-            &req,
-            Some("Bearer rt-abc123"),
-            1000,
-            "node-0",
-        );
+        let result =
+            to_inference_request(b"raw body", &req, Some("Bearer rt-abc123"), 1000, "node-0");
         assert_eq!(result.sla_class, SlaClass::Realtime as i32);
     }
 

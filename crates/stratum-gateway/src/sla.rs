@@ -75,7 +75,6 @@ pub fn assign_sla_class(auth_header: Option<&str>) -> SlaClass {
         SlaClass::Batch
     }
 }
-        
 
 #[cfg(test)]
 mod tests {
@@ -99,10 +98,7 @@ mod tests {
 
     #[test]
     fn batch_token_prefix_assigns_batch() {
-        assert_eq!(
-            assign_sla_class(Some("Bearer bt-def456")),
-            SlaClass::Batch
-        );
+        assert_eq!(assign_sla_class(Some("Bearer bt-def456")), SlaClass::Batch);
     }
 
     #[test]

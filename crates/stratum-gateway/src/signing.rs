@@ -86,7 +86,10 @@ mod tests {
         let body_hash = hash_body(b"collision test");
         let key1 = compute_replay_key(1_000, &body_hash, "node-0");
         let key2 = compute_replay_key(1_001, &body_hash, "node-0");
-        assert_ne!(key1, key2, "different timestamps must produce different keys");
+        assert_ne!(
+            key1, key2,
+            "different timestamps must produce different keys"
+        );
     }
 
     #[test]

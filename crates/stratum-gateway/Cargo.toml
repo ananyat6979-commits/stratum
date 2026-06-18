@@ -9,7 +9,13 @@ sha2 = "0.10"
 hex = "0.4"
 prost = "0.13"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+axum = "0.7"
 
 [build-dependencies]
 prost-build = "0.13"
 protox = "0.7"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

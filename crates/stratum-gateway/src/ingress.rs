@@ -95,11 +95,14 @@ fn extract_auth_header(headers: &HeaderMap) -> Option<&str> {
 /// succeeds but before the response is sent, the consumed token is not
 /// returned (consistent with `RateLimiter::check`'s documented contract:
 /// rate limiting must be conservative under cancellation).
+
 async fn handle_chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    use tracing::instrument;
+
     let parsed: OpenAiCompatRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(e) => {
@@ -122,6 +125,11 @@ async fn handle_chat_completions(
     let sla_class = assign_sla_class(auth_header);
 
     if !state.rate_limiter.check(sla_class) {
+        tracing::warn!(
+            stratum.sla_class = %sla_class.as_str(),
+            stratum.rate_limit_allowed = false,
+            "request rejected: rate limit exceeded"
+        );
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({
@@ -134,6 +142,14 @@ async fn handle_chat_completions(
 
     let inference_request =
         to_inference_request(&body, &parsed, auth_header, now_ns(), &state.node_id);
+
+    tracing::info!(
+        stratum.replay_key = %inference_request.replay_key,
+        stratum.sla_class = %sla_class.as_str(),
+        stratum.rate_limit_allowed = true,
+        stratum.ingress_node_id = %state.node_id,
+        "request accepted"
+    );
 
     // Stub response: no router/worker exists yet to forward this to.
     // Phase 2 replaces this block with a gRPC call to stratum-router and

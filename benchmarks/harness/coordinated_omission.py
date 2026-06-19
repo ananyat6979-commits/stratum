@@ -130,23 +130,8 @@ class LoadConfig:
 def _apply_co_correction(
     measurements: list[RawMeasurement],
     inter_arrival_time_s: float,
+    max_phantom_latency_s: float = 5.0,
 ) -> list[float]:
-    """Apply coordinated omission correction to a set of raw measurements.
-
-    For each measurement where the actual response time exceeded the
-    intended issue time by more than one inter-arrival interval, we
-    synthesize phantom measurements for all the requests that would
-    have been issued during the slow period but were held back by the
-    server's slowness.
-
-    The phantom measurements represent real latency that real clients
-    would have experienced had the load generator not coordinated with
-    the server's slowness.
-
-    Returns:
-        CO-corrected list of latencies in milliseconds, including both
-        real measurements and phantom measurements.
-    """
     corrected: list[float] = []
 
     for m in measurements:
@@ -160,11 +145,11 @@ def _apply_co_correction(
         # CO correction: synthesize phantom measurements for requests
         # that would have been issued during the slow period
         phantom_issue_time = m.intended_issue_time_s + inter_arrival_time_s
-        while phantom_issue_time < m.actual_response_time_s:
+        while (phantom_issue_time < m.actual_response_time_s and
+               m.actual_response_time_s - phantom_issue_time < max_phantom_latency_s):  # ADD THIS GUARD
             phantom_latency_ms = (m.actual_response_time_s - phantom_issue_time) * 1000.0
             corrected.append(phantom_latency_ms)
             phantom_issue_time += inter_arrival_time_s
-
     return corrected
 
 

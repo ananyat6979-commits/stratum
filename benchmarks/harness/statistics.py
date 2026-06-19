@@ -85,7 +85,7 @@ class ComparisonResult:
 def bootstrap_percentile_ci(
     measurements: Sequence[float],
     percentile: float,
-    n_bootstrap: int = 10_000,
+    n_bootstrap: int = 1_000,
     confidence_level: float = 0.95,
     rng_seed: int = 42,
 ) -> ConfidenceInterval:
@@ -116,11 +116,10 @@ def bootstrap_percentile_ci(
 
     point_estimate = float(np.percentile(arr, percentile))
 
-    bootstrap_estimates = np.percentile(
-        rng.choice(arr, size=(n_bootstrap, len(arr)), replace=True),
-        percentile,
-        axis=1,
-    )
+    bootstrap_estimates = np.array([
+        np.percentile(rng.choice(arr, size=len(arr), replace=True), percentile)
+        for _ in range(n_bootstrap)
+    ])
 
     alpha = 1.0 - confidence_level
     lower = float(np.percentile(bootstrap_estimates, 100 * alpha / 2))
@@ -136,7 +135,7 @@ def bootstrap_percentile_ci(
 
 def bootstrap_mean_ci(
     measurements: Sequence[float],
-    n_bootstrap: int = 10_000,
+    n_bootstrap: int = 1_000,
     confidence_level: float = 0.95,
     rng_seed: int = 42,
 ) -> ConfidenceInterval:
@@ -145,10 +144,10 @@ def bootstrap_mean_ci(
     rng = np.random.default_rng(rng_seed)
 
     point_estimate = float(np.mean(arr))
-    bootstrap_means = np.mean(
-        rng.choice(arr, size=(n_bootstrap, len(arr)), replace=True),
-        axis=1,
-    )
+    bootstrap_means = np.array([
+        np.mean(rng.choice(arr, size=len(arr), replace=True))
+        for _ in range(n_bootstrap)
+    ])
 
     alpha = 1.0 - confidence_level
     lower = float(np.percentile(bootstrap_means, 100 * alpha / 2))
@@ -179,7 +178,7 @@ def compare_latencies(
     treatment: Sequence[float],
     control: Sequence[float],
     alpha: float = 0.05,
-    n_bootstrap: int = 10_000,
+    n_bootstrap: int = 1_000,
     confidence_level: float = 0.95,
     rng_seed: int = 42,
 ) -> ComparisonResult:
@@ -266,7 +265,7 @@ def compare_latencies(
 def compute_percentiles(
     measurements: Sequence[float],
     confidence_level: float = 0.95,
-    n_bootstrap: int = 10_000,
+    n_bootstrap: int = 1_000,
     rng_seed: int = 42,
 ) -> dict[str, ConfidenceInterval]:
     """Compute the standard latency percentile suite with bootstrap CIs.

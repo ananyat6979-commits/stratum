@@ -19,3 +19,5 @@ protox = "0.7"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }

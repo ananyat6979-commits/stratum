@@ -10,9 +10,11 @@
 //! ahead of substance.
 
 use stratum_gateway::ingress::{build_router, AppState};
+use stratum_gateway::telemetry::init_telemetry;
 
 #[tokio::main]
 async fn main() {
+    init_telemetry();
     let state = AppState::new("gateway-node-0");
     let app = build_router(state);
 
@@ -23,9 +25,9 @@ async fn main() {
     println!("stratum-gateway listening on http://127.0.0.1:8080");
     println!("try: curl -X POST http://127.0.0.1:8080/v1/chat/completions \\");
     println!(r#"       -H "Content-Type: application/json" \"#);
-    println!(r#"       -d '{{"model":"phi3:mini","messages":[{{"role":"user","content":"hello"}}],"max_tokens":50}}'"#);
+    println!(
+        r#"       -d '{{"model":"phi3:mini","messages":[{{"role":"user","content":"hello"}}],"max_tokens":50}}'"#
+    );
 
-    axum::serve(listener, app)
-        .await
-        .expect("server error");
+    axum::serve(listener, app).await.expect("server error");
 }

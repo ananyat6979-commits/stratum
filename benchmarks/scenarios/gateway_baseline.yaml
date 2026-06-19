@@ -1,0 +1,62 @@
+# STRATUM Benchmark Scenario: Gateway Baseline (Round-Robin / Stub Response)
+#
+# PURPOSE
+# -------
+# Establishes the performance baseline for stratum-gateway's routing
+# overhead before any routing intelligence is added. This is the
+# denominator against which all future routing improvements are measured.
+#
+# What is being measured: the full gateway pipeline from HTTP ingress to
+# response, including:
+#   - Raw body reading (Bytes extractor)
+#   - JSON parsing (serde_json::from_slice)
+#   - SLA class assignment (string comparison)
+#   - Rate limiter check (mutex + float arithmetic)
+#   - Request signing (SHA-256)
+#   - Proto transcoding (field assignment)
+#   - HTTP response serialization (serde_json)
+#
+# What is NOT being measured yet: actual inference latency (no model),
+# routing decision latency (no FAISS index), network to worker (no worker).
+# Those will be added in Phase 2 benchmarks and compared against this baseline.
+#
+# WORKLOAD
+# --------
+# Poisson arrivals at 50 RPS. Poisson is the correct arrival process model
+# for web traffic (memoryless inter-arrival times). Do NOT use a fixed
+# inter-arrival time -- that would be a uniform load generator which
+# underestimates variance and produces optimistic tail latency.
+#
+# HARDWARE NOTE
+# -------------
+# This scenario is calibrated for a laptop-class machine (8-16GB RAM,
+# 4-8 cores). On a server-class machine, increase arrival_rate_rps to
+# explore the saturation point. On this hardware, 50 RPS is chosen to
+# stay well below saturation (gateway is I/O-bound at this scale, not
+# CPU-bound) so the measurement reflects routing overhead, not queueing.
+#
+# COORDINATED OMISSION
+# --------------------
+# CO correction is ALWAYS enabled in this harness. The uncorrected
+# measurements are also retained in raw_measurements for auditing but
+# are NOT used for any statistical claims.
+
+name: gateway_baseline_round_robin
+target_url: "http://127.0.0.1:8080/v1/chat/completions"
+arrival_rate_rps: 50
+duration_seconds: 60
+warmup_seconds: 10
+
+# Request body: realistic minimum for the OpenAI-compatible endpoint.
+# Short prompt to minimize JSON parse time and isolate gateway overhead.
+request_body:
+  model: "phi3:mini"
+  messages:
+    - role: "user"
+      content: "What is 2+2?"
+  max_tokens: 50
+
+# No auth header: BATCH class, simplest SLA path through the rate limiter.
+# A separate scenario (gateway_baseline_realtime.yaml) will test the
+# REALTIME path when rate limit comparison is the focus.
+auth_header: null

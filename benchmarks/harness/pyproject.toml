@@ -1,0 +1,13 @@
+[project]
+name = "stratum-benchmark-harness"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.28.1",
+    "numpy>=2.2.6",
+    "pyarrow>=24.0.0",
+    "pyyaml>=6.0.3",
+    "scipy>=1.15.3",
+]

@@ -1,3 +1,131 @@
 syntax = "proto3";
 package stratum.v1;
 option go_package = "github.com/stratum-project/stratum/gen/go/stratum/v1";
+
+// CausalDecisionEvent is the atomic unit of the causal event log.
+// Every routing decision, request ingress, and inference response emits
+// one of these events. The dependency_ids field encodes the causal DAG:
+// which prior events influenced this one.
+//
+// Design rationale: RFC-001 (docs/rfc/RFC-001-causal-observability.md)
+message CausalDecisionEvent {
+  // Lamport logical timestamp. Monotonically increasing within a node.
+  // Globally ordered by (lamport_ts, emitter_node_id, event_id).
+  // See: stratum-replay/src/logical_clock.rs
+  uint64 lamport_ts = 1;
+
+  // Unique event identifier (UUID v4, hex without dashes).
+  string event_id = 2;
+
+  // IDs of events that causally preceded this event.
+  // Empty for RequestIngressEvent (no causal predecessors).
+  // RoutingDecisionEvent lists its ingress event as a dependency.
+  // InferenceResponseEvent lists its routing decision as a dependency.
+  repeated string dependency_ids = 3;
+
+  // The node that emitted this event.
+  string emitter_node_id = 4;
+
+  oneof payload {
+    RequestIngressEvent request_ingress = 5;
+    RoutingDecisionEvent routing_decision = 6;
+    InferenceResponseEvent inference_response = 7;
+  }
+}
+
+// Emitted by stratum-gateway at request ingress, before routing.
+message RequestIngressEvent {
+  // The replay_key computed by signing::compute_replay_key.
+  // Primary key linking all events for a single request.
+  string replay_key = 1;
+
+  // The full InferenceRequest proto (from inference.proto).
+  // Stored here so replay can reconstruct the request without the
+  // original HTTP body.
+  InferenceRequest request = 2;
+
+  // Wall clock at ingress in nanoseconds since Unix epoch.
+  // Preserved for reference and causal ordering analysis.
+  // NOT used during replay (replay uses lamport_ts instead).
+  int64 ingress_wall_clock_ns = 3;
+}
+
+// Emitted by stratum-router after selecting a worker.
+// Contains ALL oracle state used in the decision -- this is the
+// critical invariant for deterministic replay: the oracle state
+// snapshot means replay does not need to re-query the live oracle.
+message RoutingDecisionEvent {
+  string replay_key = 1;
+  string selected_worker_id = 2;
+
+  // Overall routing score for the selected worker.
+  double routing_score = 3;
+
+  // Component breakdown of the routing score.
+  RoutingScoreComponents score_components = 4;
+
+  // Snapshot of ALL oracle state used to compute this decision.
+  // This is what makes deterministic replay possible.
+  OracleStateSnapshot oracle_state_snapshot = 5;
+
+  // Bandit weights at decision time.
+  // Updated by LinUCB after each observation; snapshotted here so
+  // replay uses the weights that were active at decision time, not
+  // the current (post-update) weights.
+  RoutingScoreWeights bandit_weights_snapshot = 6;
+}
+
+// Snapshot of oracle state at routing decision time.
+// Contains every signal the router consulted to make its decision.
+message OracleStateSnapshot {
+  // KV cache pressure estimate per worker (0.0 = empty, 1.0 = full).
+  map<string, double> kv_pressure_by_worker = 1;
+
+  // Cache hit probability estimate per worker for this request.
+  map<string, double> cache_hit_prob_by_worker = 2;
+
+  // Lamport timestamp of the oracle reading used for this decision.
+  // Used for staleness analysis: how old was the oracle data when
+  // the routing decision was made?
+  uint64 oracle_reading_lamport_ts = 3;
+}
+
+// Per-signal component breakdown of a routing score.
+// Weights applied to these components are in RoutingScoreWeights.
+message RoutingScoreComponents {
+  double cache_hit_prob = 1;
+  double inverse_latency = 2;
+  double sla_affinity = 3;
+  double pressure_avoidance = 4;
+}
+
+// LinUCB bandit weights at routing decision time.
+// These sum to 1.0 after normalization.
+message RoutingScoreWeights {
+  double cache_hit_prob = 1;
+  double inverse_latency = 2;
+  double sla_affinity = 3;
+  double pressure_avoidance = 4;
+}
+
+// Emitted by the inference worker when a response is generated.
+// The response_bytes field is used by the replay engine's mock model
+// to serve recorded responses instead of re-running inference.
+message InferenceResponseEvent {
+  string replay_key = 1;
+  string worker_id = 2;
+
+  // Raw response bytes, verbatim from the model.
+  // Stored as bytes (not string) to avoid encoding assumptions.
+  // The mock model serves these bytes exactly during replay.
+  bytes response_bytes = 3;
+
+  double ttft_ms = 4;           // Time to first token
+  double total_latency_ms = 5;  // End-to-end latency
+  bool was_cache_hit = 6;       // Whether the KV cache was hit
+  uint32 kv_blocks_used = 7;    // KV cache blocks consumed
+}
+
+// Import InferenceRequest from inference.proto so RequestIngressEvent
+// can embed the full request.
+import "stratum/v1/inference.proto";

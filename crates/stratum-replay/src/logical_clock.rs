@@ -98,13 +98,16 @@ impl LogicalClock {
         }
     }
 
-    /// Returns the current clock value without advancing it.
+    /// Advance the clock for a local event and return the new timestamp.
     ///
-    /// Use for reading the clock value for diagnostics only, not for
-    /// assigning event timestamps. All event timestamps must go through
-    /// `tick()` to guarantee uniqueness.
-    pub fn current(&self) -> u64 {
-        self.value.load(Ordering::SeqCst)
+    /// Returns the timestamp ASSIGNED TO THIS EVENT, which is the value
+    /// before incrementing. The internal clock value after this call is
+    /// one higher than the returned value.
+    ///
+    /// Example: if the clock is at 5, tick() returns 5 and the clock
+    /// becomes 6. The event that called tick() has timestamp 5.
+    pub fn tick(&self) -> u64 {
+        self.value.fetch_add(1, Ordering::SeqCst)
     }
 }
 
@@ -145,6 +148,15 @@ mod tests {
         assert_eq!(clock.tick(), 1);
         assert_eq!(clock.tick(), 2);
     }
+    
+    #[test]
+    fn tick_returns_pre_increment_value() {
+        let clock = LogicalClock::new("node-0");
+        assert_eq!(clock.tick(), 0);   // event 0 assigned ts=0, clock now=1
+        assert_eq!(clock.current(), 1);
+        assert_eq!(clock.tick(), 1);   // event 1 assigned ts=1, clock now=2
+        assert_eq!(clock.current(), 2);
+    }
 
     #[test]
     fn tick_is_monotonically_increasing() {
@@ -168,8 +180,8 @@ mod tests {
 
         // Must be max(2, 10) + 1 = 11
         assert_eq!(after_update, 11);
-        // Subsequent ticks must continue from 11
-        assert_eq!(clock.tick(), 12);
+        assert_eq!(clock.tick(), 11);  // fetch_add returns pre-increment value
+        assert_eq!(clock.current(), 12); // clock is now 12
     }
 
     #[test]

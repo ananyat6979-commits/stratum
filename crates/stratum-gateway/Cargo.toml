@@ -12,6 +12,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 axum = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 [build-dependencies]
 prost-build = "0.13"
@@ -19,5 +21,3 @@ protox = "0.7"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
-
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }

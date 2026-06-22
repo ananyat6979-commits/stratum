@@ -95,14 +95,11 @@ fn extract_auth_header(headers: &HeaderMap) -> Option<&str> {
 /// succeeds but before the response is sent, the consumed token is not
 /// returned (consistent with `RateLimiter::check`'s documented contract:
 /// rate limiting must be conservative under cancellation).
-
 async fn handle_chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    use tracing::instrument;
-
     let parsed: OpenAiCompatRequest = match serde_json::from_slice(&body) {
         Ok(req) => req,
         Err(e) => {

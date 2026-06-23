@@ -48,38 +48,29 @@ pub struct LogicalClock {
 }
 
 impl LogicalClock {
-    /// Create a new logical clock for the given node, initialized to 0.
-    ///
-    /// # Note on initialization
-    /// Per RFC-001 (Open Question 1), the clock is initialized to 0
-    /// rather than the wall clock. This means clock values are not
-    /// globally unique across node restarts. If a node restarts and
-    /// reuses clock values, the replay engine must detect this via the
-    /// event log's monotonicity invariant (see `AppendOnlyEventLog`).
-    /// This is acceptable for Phase 2; if cross-restart uniqueness is
-    /// needed, initialize with wall clock ns (open question deferred).
     pub fn new(node_id: impl Into<Arc<str>>) -> Self {
         Self {
             value: Arc::new(AtomicU64::new(0)),
             node_id: node_id.into(),
         }
     }
-
-    /// Advance the clock for a local event and return the new timestamp.
+    /// Advance the clock for a local event and return the timestamp
+    /// assigned to this event.
     ///
-    /// Equivalent to Lamport's "local event" rule: increment by 1.
-    /// The returned value is the timestamp assigned to this event.
+    /// Uses fetch_add which returns the PRE-increment value: if the
+    /// clock is at 5, tick() returns 5 and the clock becomes 6.
+    /// The caller gets timestamp 5; the next caller gets 6.
     ///
-    /// # Atomicity
-    /// The fetch_add is atomic with SeqCst ordering, ensuring that no
-    /// two concurrent callers receive the same timestamp on the same node.
+    /// This is the standard fetch_add semantic (post-increment in C++
+    /// terms: "i++" returns old value, then increments). Document this
+    /// explicitly because confusing pre/post semantics causes off-by-one
+    /// errors in timestamp assignment -- see skills.md Failures Hall of Fame.
     pub fn tick(&self) -> u64 {
         self.value.fetch_add(1, Ordering::SeqCst)
     }
-
-    /// Update the clock after receiving a message with the given timestamp.
+    /// Update the clock on receiving a message with the given timestamp.
     ///
-    /// Implements Lamport's "receive" rule: clock = max(local, received) + 1.
+    /// Lamport receive rule: clock = max(local, received) + 1.
     /// Returns the new clock value after the update.
     pub fn update(&self, received_ts: u64) -> u64 {
         loop {
@@ -92,22 +83,16 @@ impl LogicalClock {
                 Ordering::SeqCst,
             ) {
                 Ok(_) => return new_value,
-                // Another thread updated the clock concurrently; retry
                 Err(_) => continue,
             }
         }
     }
-
-    /// Advance the clock for a local event and return the new timestamp.
+    /// Read the current clock value without advancing it.
     ///
-    /// Returns the timestamp ASSIGNED TO THIS EVENT, which is the value
-    /// before incrementing. The internal clock value after this call is
-    /// one higher than the returned value.
-    ///
-    /// Example: if the clock is at 5, tick() returns 5 and the clock
-    /// becomes 6. The event that called tick() has timestamp 5.
-    pub fn tick(&self) -> u64 {
-        self.value.fetch_add(1, Ordering::SeqCst)
+    /// Use for diagnostics only. All event timestamps must go through
+    /// tick() to guarantee uniqueness.
+    pub fn current(&self) -> u64 {
+        self.value.load(Ordering::SeqCst)
     }
 }
 

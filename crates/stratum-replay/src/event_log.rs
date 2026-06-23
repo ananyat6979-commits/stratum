@@ -34,7 +34,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use bincode::{deserialize, serialize};
-use lmdb::{Database, Environment, Transaction, WriteFlags};
+use lmdb::{Cursor, Database, Environment, Transaction, WriteFlags};
 use serde::{Deserialize, Serialize};
 
 use crate::logical_clock::{EventOrderingKey, LogicalClock};
@@ -261,8 +261,9 @@ impl AppendOnlyEventLog {
     /// Return the total number of events in the log.
     pub fn len(&self) -> Result<usize, EventLogError> {
         let txn = self.env.begin_ro_txn()?;
-        let stat = txn.stat(self.db)?;
-        Ok(stat.entries())
+        let mut cursor = txn.open_ro_cursor(self.db)?;
+        let count = cursor.iter().count();
+        Ok(count)
     }
 
     /// Return true if the log has no events.

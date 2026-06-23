@@ -133,13 +133,13 @@ mod tests {
         assert_eq!(clock.tick(), 1);
         assert_eq!(clock.tick(), 2);
     }
-    
+
     #[test]
     fn tick_returns_pre_increment_value() {
         let clock = LogicalClock::new("node-0");
-        assert_eq!(clock.tick(), 0);   // event 0 assigned ts=0, clock now=1
+        assert_eq!(clock.tick(), 0); // event 0 assigned ts=0, clock now=1
         assert_eq!(clock.current(), 1);
-        assert_eq!(clock.tick(), 1);   // event 1 assigned ts=1, clock now=2
+        assert_eq!(clock.tick(), 1); // event 1 assigned ts=1, clock now=2
         assert_eq!(clock.current(), 2);
     }
 
@@ -149,7 +149,10 @@ mod tests {
         let mut last = clock.tick();
         for _ in 0..100 {
             let next = clock.tick();
-            assert!(next > last, "clock must be strictly increasing: {next} <= {last}");
+            assert!(
+                next > last,
+                "clock must be strictly increasing: {next} <= {last}"
+            );
             last = next;
         }
     }
@@ -165,7 +168,7 @@ mod tests {
 
         // Must be max(2, 10) + 1 = 11
         assert_eq!(after_update, 11);
-        assert_eq!(clock.tick(), 11);  // fetch_add returns pre-increment value
+        assert_eq!(clock.tick(), 11); // fetch_add returns pre-increment value
         assert_eq!(clock.current(), 12); // clock is now 12
     }
 

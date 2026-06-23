@@ -235,10 +235,9 @@ impl AppendOnlyEventLog {
         let mut cursor = txn.open_ro_cursor(self.db)?;
 
         let mut events = Vec::new();
-        for item in cursor.iter() {
-            let (_key, value) = item?;
-            let event: ReplayEvent =
-                deserialize(value).map_err(|e| EventLogError::Serialization(e.to_string()))?;
+        for (_key, value) in cursor.iter() {
+            let event: ReplayEvent = deserialize(value)
+                .map_err(|e| EventLogError::Serialization(e.to_string()))?;
             events.push(event);
         }
 

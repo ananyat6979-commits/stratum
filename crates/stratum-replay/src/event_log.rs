@@ -24,7 +24,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use bincode::{deserialize, serialize};
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 use crate::logical_clock::{EventOrderingKey, LogicalClock};
@@ -57,6 +57,7 @@ impl ReplayEvent {
 #[derive(Debug)]
 pub enum EventLogError {
     Redb(redb::Error),
+    RedbDatabase(redb::DatabaseError),
     RedbTransaction(redb::TransactionError),
     RedbTable(redb::TableError),
     RedbCommit(redb::CommitError),
@@ -69,6 +70,7 @@ impl std::fmt::Display for EventLogError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Redb(e) => write!(f, "redb error: {e}"),
+            Self::RedbDatabase(e) => write!(f, "redb database error: {e}"),
             Self::RedbTransaction(e) => write!(f, "redb transaction error: {e}"),
             Self::RedbTable(e) => write!(f, "redb table error: {e}"),
             Self::RedbCommit(e) => write!(f, "redb commit error: {e}"),
@@ -84,6 +86,9 @@ impl std::fmt::Display for EventLogError {
 
 impl From<redb::Error> for EventLogError {
     fn from(e: redb::Error) -> Self { Self::Redb(e) }
+}
+impl From<redb::DatabaseError> for EventLogError {
+    fn from(e: redb::DatabaseError) -> Self { Self::RedbDatabase(e) }
 }
 impl From<redb::TransactionError> for EventLogError {
     fn from(e: redb::TransactionError) -> Self { Self::RedbTransaction(e) }

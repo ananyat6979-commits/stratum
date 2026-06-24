@@ -76,7 +76,10 @@ impl std::fmt::Display for EventLogError {
             Self::RedbCommit(e) => write!(f, "redb commit error: {e}"),
             Self::RedbStorage(e) => write!(f, "redb storage error: {e}"),
             Self::Serialization(s) => write!(f, "serialization error: {s}"),
-            Self::NonMonotonicTimestamp { attempted, last_written } => write!(
+            Self::NonMonotonicTimestamp {
+                attempted,
+                last_written,
+            } => write!(
                 f,
                 "non-monotonic timestamp: attempted {attempted}, last written {last_written}"
             ),
@@ -85,22 +88,34 @@ impl std::fmt::Display for EventLogError {
 }
 
 impl From<redb::Error> for EventLogError {
-    fn from(e: redb::Error) -> Self { Self::Redb(e) }
+    fn from(e: redb::Error) -> Self {
+        Self::Redb(e)
+    }
 }
 impl From<redb::DatabaseError> for EventLogError {
-    fn from(e: redb::DatabaseError) -> Self { Self::RedbDatabase(e) }
+    fn from(e: redb::DatabaseError) -> Self {
+        Self::RedbDatabase(e)
+    }
 }
 impl From<redb::TransactionError> for EventLogError {
-    fn from(e: redb::TransactionError) -> Self { Self::RedbTransaction(e) }
+    fn from(e: redb::TransactionError) -> Self {
+        Self::RedbTransaction(e)
+    }
 }
 impl From<redb::TableError> for EventLogError {
-    fn from(e: redb::TableError) -> Self { Self::RedbTable(e) }
+    fn from(e: redb::TableError) -> Self {
+        Self::RedbTable(e)
+    }
 }
 impl From<redb::CommitError> for EventLogError {
-    fn from(e: redb::CommitError) -> Self { Self::RedbCommit(e) }
+    fn from(e: redb::CommitError) -> Self {
+        Self::RedbCommit(e)
+    }
 }
 impl From<redb::StorageError> for EventLogError {
-    fn from(e: redb::StorageError) -> Self { Self::RedbStorage(e) }
+    fn from(e: redb::StorageError) -> Self {
+        Self::RedbStorage(e)
+    }
 }
 impl From<Box<bincode::ErrorKind>> for EventLogError {
     fn from(e: Box<bincode::ErrorKind>) -> Self {
@@ -120,7 +135,10 @@ impl AppendOnlyEventLog {
     ///
     /// Unlike LMDB, redb uses a single file, not a directory.
     /// The parent directory must exist; redb creates the file if absent.
-    pub fn open(path: impl AsRef<Path>, node_id: impl Into<Arc<str>>) -> Result<Self, EventLogError> {
+    pub fn open(
+        path: impl AsRef<Path>,
+        node_id: impl Into<Arc<str>>,
+    ) -> Result<Self, EventLogError> {
         let db = Database::create(path.as_ref())?;
 
         // Ensure the table exists
@@ -190,8 +208,13 @@ impl AppendOnlyEventLog {
     }
 
     /// Load events in the Lamport timestamp range [start_ts, end_ts].
-    pub fn load_range(&self, start_ts: u64, end_ts: u64) -> Result<Vec<ReplayEvent>, EventLogError> {
-        Ok(self.load_all()?
+    pub fn load_range(
+        &self,
+        start_ts: u64,
+        end_ts: u64,
+    ) -> Result<Vec<ReplayEvent>, EventLogError> {
+        Ok(self
+            .load_all()?
             .into_iter()
             .filter(|e| e.lamport_ts >= start_ts && e.lamport_ts <= end_ts)
             .collect())

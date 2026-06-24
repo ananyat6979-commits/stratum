@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+stratum-replay = { path = "../stratum-replay" }
+uuid = { version = "1.6", features = ["v4"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"

@@ -936,6 +936,12 @@ dependencies = [
 [[package]]
 name = "stratum-router"
 version = "0.1.0"
+dependencies = [
+ "bincode",
+ "serde",
+ "stratum-replay",
+ "uuid",
+]
 
 [[package]]
 name = "stratum-scheduler"

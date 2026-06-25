@@ -56,12 +56,12 @@ impl ReplayEvent {
 /// Error types for event log operations.
 #[derive(Debug)]
 pub enum EventLogError {
-    Redb(redb::Error),
-    RedbDatabase(redb::DatabaseError),
-    RedbTransaction(redb::TransactionError),
-    RedbTable(redb::TableError),
-    RedbCommit(redb::CommitError),
-    RedbStorage(redb::StorageError),
+    Redb(Box<redb::Error>),
+    RedbDatabase(Box<redb::DatabaseError>),
+    RedbTransaction(Box<redb::TransactionError>),
+    RedbTable(Box<redb::TableError>),
+    RedbCommit(Box<redb::CommitError>),
+    RedbStorage(Box<redb::StorageError>),
     Serialization(String),
     NonMonotonicTimestamp { attempted: u64, last_written: u64 },
 }
@@ -89,32 +89,32 @@ impl std::fmt::Display for EventLogError {
 
 impl From<redb::Error> for EventLogError {
     fn from(e: redb::Error) -> Self {
-        Self::Redb(e)
+        Self::Redb(Box::new(e))
     }
 }
 impl From<redb::DatabaseError> for EventLogError {
     fn from(e: redb::DatabaseError) -> Self {
-        Self::RedbDatabase(e)
+        Self::RedbDatabase(Box::new(e))
     }
 }
 impl From<redb::TransactionError> for EventLogError {
     fn from(e: redb::TransactionError) -> Self {
-        Self::RedbTransaction(e)
+        Self::RedbTransaction(Box::new(e))
     }
 }
 impl From<redb::TableError> for EventLogError {
     fn from(e: redb::TableError) -> Self {
-        Self::RedbTable(e)
+        Self::RedbTable(Box::new(e))
     }
 }
 impl From<redb::CommitError> for EventLogError {
     fn from(e: redb::CommitError) -> Self {
-        Self::RedbCommit(e)
+        Self::RedbCommit(Box::new(e))
     }
 }
 impl From<redb::StorageError> for EventLogError {
     fn from(e: redb::StorageError) -> Self {
-        Self::RedbStorage(e)
+        Self::RedbStorage(Box::new(e))
     }
 }
 impl From<Box<bincode::ErrorKind>> for EventLogError {

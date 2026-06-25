@@ -19,7 +19,6 @@
 //! `route_and_log()`, never through `route()` directly.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 use stratum_replay::event_log::{AppendOnlyEventLog, EventLogError, ReplayEvent};
 

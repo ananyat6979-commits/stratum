@@ -930,6 +930,7 @@ dependencies = [
  "bincode",
  "redb",
  "serde",
+ "stratum-router",
  "uuid",
 ]
 

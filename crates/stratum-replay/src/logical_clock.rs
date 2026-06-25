@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn event_ordering_key_sorts_by_lamport_then_node_then_event() {
-        let mut keys = vec![
+        let mut keys = [
             EventOrderingKey::new(5, "node-1", "event-z"),
             EventOrderingKey::new(3, "node-0", "event-a"),
             EventOrderingKey::new(5, "node-0", "event-b"),

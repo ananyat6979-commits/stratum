@@ -8,3 +8,6 @@ redb = "2"
 bincode = "1.3"
 uuid = { version = "1.6", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+stratum-router = { path = "../stratum-router" }

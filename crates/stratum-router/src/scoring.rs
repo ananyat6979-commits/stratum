@@ -304,7 +304,7 @@ mod tests {
             kv_pressure: 0.3,
         };
         let score = compute_score(&signals, &weights, 1000.0);
-        assert!(score >= 0.0 && score <= 1.0, "score {score} out of [0,1]");
+        assert!((0.0..=1.0).contains(&score), "score {score} out of [0,1]");
     }
 
     #[test]

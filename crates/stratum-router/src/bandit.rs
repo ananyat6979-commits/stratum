@@ -50,6 +50,7 @@ pub struct LinUcbArm {
 impl LinUcbArm {
     pub fn new() -> Self {
         let mut a = [[0.0f64; D]; D];
+        #[allow(clippy::needless_range_loop)]
         for i in 0..D {
             a[i][i] = 1.0; // identity matrix
         }
@@ -67,14 +68,14 @@ impl LinUcbArm {
     /// * `reward` — observed reward (e.g., normalized inverse latency)
     pub fn update(&mut self, context: &[f64; D], reward: f64) {
         // A += context * context^T
-        for i in 0..D {
-            for j in 0..D {
-                self.a[i][j] += context[i] * context[j];
+        for (i, row) in self.a.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell += context[i] * context[j];
             }
         }
         // b += reward * context
-        for i in 0..D {
-            self.b[i] += reward * context[i];
+        for (i, b_i) in self.b.iter_mut().enumerate() {
+            *b_i += reward * context[i];
         }
         self.n_pulls += 1;
     }
@@ -130,7 +131,13 @@ impl Default for LinUcbArm {
 /// scoring function uses those weights to select the best worker.
 pub struct LinUcbBandit {
     arm: LinUcbArm,
-    /// Exploration parameter. Decreases as data accumulates.
+    /// Exploration parameter. Currently unused by LinUcbBandit's public
+    /// API (current_weights() reads theta_hat directly, not ucb_score()).
+    /// Reserved for Phase 4 when the bandit selects among discrete
+    /// strategy variants via UCB rather than returning a single learned
+    /// weight vector. Kept now rather than removed so the constructor
+    /// signature doesn't change when that wiring lands.
+    #[allow(dead_code)]
     alpha: f64,
 }
 
@@ -237,6 +244,10 @@ fn solve_linear_system(a: &[[f64; D]; D], b: &[f64; D]) -> [f64; D] {
 
         for row in (col + 1)..D {
             let factor = aug[row][col] / pivot;
+            // needless_range_loop: this mutates aug[row] while reading aug[col],
+            // which can't be expressed as a single iterator without split_at_mut.
+            // D=4 makes this loop's cost negligible; clarity wins over the lint here.
+            #[allow(clippy::needless_range_loop)]
             for k in col..=D {
                 aug[row][k] -= factor * aug[col][k];
             }
@@ -292,6 +303,7 @@ mod tests {
     fn solve_linear_system_identity() {
         // A = I, b = [1,2,3,4] -> x = [1,2,3,4]
         let mut a = [[0.0f64; D]; D];
+        #[allow(clippy::needless_range_loop)]
         for i in 0..D {
             a[i][i] = 1.0;
         }

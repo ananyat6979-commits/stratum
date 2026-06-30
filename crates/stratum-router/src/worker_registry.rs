@@ -21,7 +21,7 @@
 //! deregister workers that are actually down.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use crate::router::WorkerSpec;
@@ -224,7 +224,7 @@ mod tests {
     use super::*;
 
     fn spec(id: &str) -> WorkerSpec {
-        WorkerSpec::new(id, format!("127.0.0.1:11434"))
+        WorkerSpec::new(id, "127.0.0.1:11434".to_string())
     }
 
     #[test]

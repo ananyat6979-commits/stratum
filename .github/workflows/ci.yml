@@ -69,7 +69,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.23.10"
           cache-dependency-path: services/causal-observer/go.sum
 
       - name: Build

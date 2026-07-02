@@ -6,11 +6,17 @@
 //!
 //! # Pipeline per request
 //! 1. Check backpressure — shed immediately if the SLA bucket is exhausted
-//! 2. If a session_id is present, try affinity routing via jump consistent hash
+//! 2. Filter to registry-routable workers — only workers explicitly marked
+//!    Unavailable are excluded; a worker absent from the registry is treated
+//!    as routable (registry is opt-in health tracking, not a whitelist)
+//! 3. If a session_id is present, try affinity routing via jump consistent hash
 //!    — route to the affinity worker if it's healthy and its pressure is < 0.8
-//! 3. Otherwise, fetch oracle signals for all routable workers and score them
-//! 4. Select the highest-scoring worker via select_best_worker()
-//! 5. Update the LinUCB bandit with the routing decision (deferred — actual
+//! 4. Otherwise, if no worker has enough oracle observations to be trusted,
+//!    fall back to round-robin so load distribution isn't silently disabled
+//!    during the cold-start window
+//! 5. Otherwise, fetch oracle signals for all routable workers and score them
+//! 6. Select the highest-scoring worker via select_best_worker()
+//! 7. Update the LinUCB bandit with the routing decision (deferred — actual
 //!    reward requires observing the outcome, so bandit.update() is called by
 //!    the caller after the inference completes, not here)
 //!
@@ -101,6 +107,11 @@ pub struct SemanticRouter<P: WorkerSignalsProvider> {
     signals_provider: Arc<P>,
     backpressure: Arc<BackpressureController>,
     weights: Arc<RwLock<ScoreWeights>>,
+    /// Round-robin counter used only during pre-warmup fallback, when no
+    /// worker has enough oracle observations to trust score-based routing.
+    /// Mirrors RoundRobinRouter's counter design so behavior degrades to
+    /// something at least as good as the strategy this one replaces.
+    fallback_counter: std::sync::atomic::AtomicU64,
 }
 
 impl<P: WorkerSignalsProvider> SemanticRouter<P> {
@@ -114,6 +125,7 @@ impl<P: WorkerSignalsProvider> SemanticRouter<P> {
             signals_provider,
             backpressure,
             weights: Arc::new(RwLock::new(ScoreWeights::equal())),
+            fallback_counter: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -181,6 +193,27 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
             return Err(RouterError::NoWorkersAvailable);
         }
 
+        // FIX 1: filter to registry-routable workers before any scoring.
+        // A worker absent from the registry is treated as routable (registry
+        // is opt-in health tracking, not a whitelist) -- only workers
+        // EXPLICITLY marked Unavailable are excluded. Previously only
+        // try_affinity_route consulted the registry, for a single candidate;
+        // every other request ignored health state entirely.
+        let routable: Vec<WorkerSpec> = workers
+            .iter()
+            .filter(|w| {
+                self.registry
+                    .health(&w.worker_id)
+                    .map(|h| h.is_routable())
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+
+        if routable.is_empty() {
+            return Err(RouterError::NoWorkersAvailable);
+        }
+
         // Extract session_id from replay_key prefix if present.
         // Convention: replay_key may be prefixed with "session:<id>:"
         // If not, no affinity is applied.
@@ -188,13 +221,13 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
             .strip_prefix("session:")
             .and_then(|s| s.split(':').next());
 
-        // Fetch oracle signals for all workers
-        let worker_ids: Vec<&str> = workers.iter().map(|w| w.worker_id.as_str()).collect();
+        // Fetch oracle signals for all routable workers
+        let worker_ids: Vec<&str> = routable.iter().map(|w| w.worker_id.as_str()).collect();
         let oracle_signals = self.signals_provider.signals_for_workers(&worker_ids);
 
         // Try affinity routing first
         if let Some(session) = session_id {
-            if let Some(worker) = self.try_affinity_route(session, workers, &oracle_signals) {
+            if let Some(worker) = self.try_affinity_route(session, &routable, &oracle_signals) {
                 return Ok(RoutingDecision {
                     score: 1.0,
                     reason: format!("affinity:{session}"),
@@ -203,7 +236,31 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
             }
         }
 
-        // Score-based routing: use oracle signals if warmed up, neutral otherwise
+        // FIX 2: pre-warmup fallback. If NO worker has enough oracle
+        // observations to be trusted, score-based selection would compare
+        // identical neutral() signals across every candidate, and
+        // select_best_worker's strict `>` tie-break pins every request to
+        // index 0 -- silently disabling load distribution during the exact
+        // window (cold start, cache empty) where it matters most. This is
+        // a regression versus RoundRobinRouter, the strategy being replaced.
+        // Fall back to the same round-robin pattern until the oracle warms up.
+        let any_warmed = oracle_signals
+            .iter()
+            .any(|s| s.n_observations >= MIN_ORACLE_PULLS);
+
+        if !any_warmed {
+            let idx = self
+                .fallback_counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize
+                % routable.len();
+            return Ok(RoutingDecision {
+                score: 1.0,
+                reason: "fallback:round_robin_pre_warmup".to_string(),
+                worker: routable[idx].clone(),
+            });
+        }
+
+        // Score-based routing: at least one worker has trustworthy signals.
         let weights = self.current_weights();
         let signals_vec: Vec<RoutingSignals> = oracle_signals
             .iter()
@@ -216,10 +273,10 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
             })
             .collect();
 
-        let best_idx = select_best_worker(workers, &signals_vec, &weights)
+        let best_idx = select_best_worker(&routable, &signals_vec, &weights)
             .ok_or(RouterError::NoWorkersAvailable)?;
 
-        let worker = workers[best_idx].clone();
+        let worker = routable[best_idx].clone();
         let score = {
             let max_latency = signals_vec
                 .iter()
@@ -292,12 +349,16 @@ mod tests {
 
     #[test]
     fn neutral_signals_before_warmup_routes_deterministically() {
+        // Note: with the pre-warmup fallback (Fix 2), all-neutral signals now
+        // route via round-robin rather than deterministic tie-break, so this
+        // test verifies the fallback path fires but no longer expects the
+        // same worker for repeated calls. See
+        // pre_warmup_fallback_distributes_evenly_across_workers for the
+        // distribution guarantee.
         let router = test_router(MockSignalsProvider::neutral());
         let workers = test_workers(3);
         let d1 = router.route("key", &workers).unwrap();
-        let d2 = router.route("key", &workers).unwrap();
-        // Same key, same neutral signals = same worker every time
-        assert_eq!(d1.worker.worker_id, d2.worker.worker_id);
+        assert!(d1.reason.contains("fallback"));
     }
 
     #[test]
@@ -407,5 +468,58 @@ mod tests {
             RouterSlaClass::Interactive
         );
         assert_eq!(infer_sla_class("sla:bogus:key"), RouterSlaClass::Batch);
+    }
+
+    #[test]
+    fn unavailable_worker_is_excluded_from_non_affinity_routing() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let workers = test_workers(3);
+        for w in &workers {
+            registry.register(w.clone());
+        }
+        registry.set_health("worker-0", WorkerHealth::Unavailable);
+
+        let bp = Arc::new(BackpressureController::with_defaults());
+        let router = SemanticRouter::new(
+            registry,
+            Arc::new(MockSignalsProvider::warmed(RoutingSignals {
+                cache_hit_prob: 0.9,
+                predicted_latency_ms: 50.0,
+                sla_affinity: 0.9,
+                kv_pressure: 0.1,
+            })),
+            bp,
+        );
+
+        for _ in 0..10 {
+            let decision = router.route("key", &workers).unwrap();
+            assert_ne!(
+                decision.worker.worker_id, "worker-0",
+                "Unavailable worker must never be selected"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_warmup_fallback_distributes_evenly_across_workers() {
+        let router = test_router(MockSignalsProvider::neutral());
+        let workers = test_workers(3);
+
+        let mut counts = [0usize; 3];
+        for _ in 0..30 {
+            let decision = router.route("key", &workers).unwrap();
+            let idx = workers
+                .iter()
+                .position(|w| w.worker_id == decision.worker.worker_id)
+                .unwrap();
+            counts[idx] += 1;
+            assert!(decision.reason.contains("fallback"));
+        }
+
+        assert_eq!(
+            counts,
+            [10, 10, 10],
+            "pre-warmup fallback must distribute evenly, not pin to worker[0]"
+        );
     }
 }

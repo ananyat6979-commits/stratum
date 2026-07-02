@@ -139,3 +139,49 @@ class TestVsBaseline:
             f"Holt-Winters RMSE {hw_rmse:.4f} should not greatly exceed "
             f"last-value RMSE {lv_rmse:.4f} on trending data"
         )
+
+
+class TestKnownLimitations:
+    """
+    Tests that document and lock in known, accepted limitations rather
+    than hide them. If a future change to scrape interval or horizon
+    calculation shifts this behavior, this test forces a deliberate,
+    reviewed decision instead of a silent regression or silent fix.
+    See predictor.py's module docstring, "KNOWN LIMITATION" section,
+    and ADR-007.
+    """
+
+    def test_short_horizon_prediction_is_dominated_by_current_level(self):
+        p = KvPressurePredictor(alpha=0.5, beta=0.3)
+        for i in range(10):
+            p.update(i * 0.05)
+        current_level = p._state.level
+        predicted = p.predict(horizon_ms=100)
+        assert abs(predicted - current_level) < 0.02, (
+            "predict() is expected to closely track current_level at "
+            "this horizon/scrape-interval ratio -- see predictor.py's "
+            "KNOWN LIMITATION docstring section. If this assertion "
+            "fails, either the horizon math changed (verify it's "
+            "intentional) or scrape_interval_ms's implicit 15000 "
+            "assumption changed (update this test to match)."
+        )
+
+    def test_predictor_still_beats_naive_on_the_metric_it_can_actually_move(self):
+        """
+        Even with the horizon limitation, Holt-Winters should not be
+        WORSE than naive last-value on a stable (non-trending) signal --
+        it should degrade gracefully to approximately last-value, not
+        introduce noise. This is the honest, achievable claim given
+        the current scrape interval; the stronger 39% RMSE improvement
+        claim requires the scrape-interval fix in ADR-007.
+        """
+        p = KvPressurePredictor(alpha=0.3, beta=0.1)
+        stable_value = 0.6
+        for _ in range(15):
+            p.update(stable_value)
+
+        predicted = p.predict(horizon_ms=100)
+        assert abs(predicted - stable_value) < 0.1, (
+            "on a stable signal, prediction should stay close to the "
+            "stable value even with the horizon limitation"
+        )

@@ -39,6 +39,40 @@ accounts for this by adjusting the forecast horizon:
   effective_horizon = requested_horizon + metric_lag
   = 100ms + 200ms = 300ms total lookahead
 
+KNOWN LIMITATION: HORIZON DOMINATED BY CURRENT LEVEL
+=====================================================
+The effective prediction horizon (100ms requested + 200ms vLLM lag =
+300ms) is a small fraction of the Prometheus scrape interval (15,000ms).
+The Holt-Winters h-step forecast is level + h*trend, where
+h = effective_horizon_ms / scrape_interval_ms = 300/15000 = 0.02.
+
+This means predict()'s output is, by construction, dominated by the
+current level -- the trend term contributes at most 2% of one step's
+worth of trend. This is mathematically correct Holt-Winters behavior,
+not an arithmetic bug: you cannot extract more forecasting signal at
+a 300ms horizon than a 15-second sampling interval actually observed.
+
+Practical consequence: predict() currently behaves close to a
+last-value predictor at these settings, despite the module's framing
+around "seeing eviction cascades coming before they happen." The
+benchmark evidence cited in this docstring's original design notes
+(RMSE 0.043 vs baseline 0.071) describes the *algorithm's* potential
+under adequate sampling density, not this deployment's actual
+achieved accuracy -- which has not yet been separately validated
+against real production KV telemetry at this scrape interval.
+
+Two paths forward, neither implemented yet (see ADR-007):
+  1. Reduce Prometheus scrape interval to sub-second (increases
+     scrape load on every worker; may not be supported by all
+     backend metrics endpoints)
+  2. Replace periodic scraping with event-driven pressure reporting:
+     the router itself reports observed KV pressure after each
+     request/response cycle, giving true request-granularity signal
+     without depending on Prometheus's sampling cadence at all
+
+Until one of these lands, treat predict()'s output as "current level,
+lightly trend-adjusted" rather than "a genuine 100ms-ahead forecast."
+
 Reference:
   Holt, C.E. (1957). "Forecasting seasonals and trends by
   exponentially weighted moving averages."

@@ -1,6 +1,8 @@
 pub mod backpressure;
 pub mod bandit;
+pub mod cache_hit_index;
 pub mod consistent_hash;
+pub mod embedding;
 pub mod http_signals_provider;
 pub mod router;
 pub mod scoring;

@@ -60,7 +60,7 @@ fn record_sessions(
         // Route the request and log the decision
         let replay_key = format!("replay-key-{i:06}");
         let (_decision, _event) =
-            route_and_log(router, &replay_key, ingress_id, workers, log).unwrap();
+            route_and_log(router, &replay_key, "test prompt", ingress_id, workers, log).unwrap();
     }
 
     // Now reload all routing decision events and deserialize their payloads
@@ -111,7 +111,9 @@ fn routing_decisions_reproduce_100_percent() {
     let mut first_mismatch: Option<String> = None;
 
     for (i, original) in original_payloads.iter().enumerate() {
-        let replayed = replay_router.route(&original.replay_key, &workers).unwrap();
+        let replayed = replay_router
+            .route(&original.replay_key, "test prompt", &workers)
+            .unwrap();
 
         if replayed.worker.worker_id == original.selected_worker_id {
             matched += 1;

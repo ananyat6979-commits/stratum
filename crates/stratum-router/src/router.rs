@@ -1,8 +1,8 @@
 //! Router trait and built-in routing strategies.
 //!
 //! # Design
-//! `RouterStrategy` is the core abstraction. Every routing algorithm —
-//! round-robin, semantic cache-aware, bandit-weighted — implements this
+//! `RouterStrategy` is the core abstraction. Every routing algorithm,
+//! round-robin, semantic cache-aware, bandit-weighted, implements this
 //! one trait. The gateway calls `route()` and gets back a worker ID and
 //! a routing score. It does not know which strategy is active.
 //!
@@ -97,10 +97,20 @@ pub trait RouterStrategy: Send + Sync + 'static {
     /// Select a worker for the given replay_key.
     ///
     /// `replay_key` identifies the request for event log correlation.
+    /// `prompt` is the request's raw text content, used by strategies
+    /// that need to reason about request similarity (e.g. SemanticRouter's
+    /// cache-hit prediction). RoundRobinRouter ignores it entirely,
+    /// accepting an unused parameter here is the honest cost of a trait
+    /// method serving both a strategy that needs content-awareness and
+    /// one that doesn't, rather than parsing prompt text out of
+    /// replay_key via string convention (fragile: prompt text can
+    /// contain any character, including the delimiters other
+    /// replay_key conventions already use).
     /// `workers` is the current set of available workers.
     fn route(
         &self,
         replay_key: &str,
+        prompt: &str,
         workers: &[WorkerSpec],
     ) -> Result<RoutingDecision, RouterError>;
 
@@ -117,7 +127,7 @@ pub trait RouterStrategy: Send + Sync + 'static {
 /// # Correctness
 /// The counter uses `fetch_add` with `Relaxed` ordering. This is correct
 /// here: we don't need the counter to be ordered relative to any other
-/// memory operation — we only need atomicity (no two calls get the same
+/// memory operation, we only need atomicity (no two calls get the same
 /// counter value). `SeqCst` would be unnecessary overhead.
 ///
 /// # Cancellation safety
@@ -144,6 +154,7 @@ impl RouterStrategy for RoundRobinRouter {
     fn route(
         &self,
         _replay_key: &str,
+        _prompt: &str,
         workers: &[WorkerSpec],
     ) -> Result<RoutingDecision, RouterError> {
         if workers.is_empty() {
@@ -172,20 +183,21 @@ impl RouterStrategy for RoundRobinRouter {
 /// in the causal DAG.
 ///
 /// The event payload is a bincode-serialized `RoutingDecisionPayload`.
-/// The event log layer treats it as opaque bytes — it does not interpret
+/// The event log layer treats it as opaque bytes, it does not interpret
 /// the payload schema.
 pub fn route_and_log(
     strategy: &dyn RouterStrategy,
     replay_key: &str,
+    prompt: &str,
     ingress_event_id: u128,
     workers: &[WorkerSpec],
     log: &AppendOnlyEventLog,
 ) -> Result<(RoutingDecision, ReplayEvent), RouterError> {
-    let decision = strategy.route(replay_key, workers)?;
+    let decision = strategy.route(replay_key, prompt, workers)?;
 
     // Serialize the routing decision as the event payload.
     // This is intentionally a simple struct, not the full causal.proto
-    // RoutingDecisionEvent — the proto layer is added in Phase 3 when
+    // RoutingDecisionEvent, the proto layer is added in Phase 3 when
     // the oracle state snapshot becomes meaningful.
     let payload = RoutingDecisionPayload {
         replay_key: replay_key.to_string(),
@@ -207,7 +219,7 @@ pub fn route_and_log(
 }
 
 /// The payload written to the event log for each routing decision.
-/// Intentionally minimal for Phase 2 — oracle state snapshot added Phase 3.
+/// Intentionally minimal for Phase 2, oracle state snapshot added Phase 3.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct RoutingDecisionPayload {
     pub replay_key: String,
@@ -232,7 +244,7 @@ mod tests {
         let mut counts = vec![0usize; 3];
 
         for _ in 0..30 {
-            let decision = router.route("key", &workers).unwrap();
+            let decision = router.route("key", "test prompt", &workers).unwrap();
             let idx = workers
                 .iter()
                 .position(|w| w.worker_id == decision.worker.worker_id)
@@ -249,9 +261,9 @@ mod tests {
         let router = RoundRobinRouter::new();
         let workers = test_workers(2);
 
-        let d0 = router.route("k", &workers).unwrap();
-        let d1 = router.route("k", &workers).unwrap();
-        let d2 = router.route("k", &workers).unwrap();
+        let d0 = router.route("k", "test prompt", &workers).unwrap();
+        let d1 = router.route("k", "test prompt", &workers).unwrap();
+        let d2 = router.route("k", "test prompt", &workers).unwrap();
 
         assert_eq!(d0.worker.worker_id, "worker-0");
         assert_eq!(d1.worker.worker_id, "worker-1");
@@ -261,7 +273,7 @@ mod tests {
     #[test]
     fn no_workers_returns_error() {
         let router = RoundRobinRouter::new();
-        let result = router.route("key", &[]);
+        let result = router.route("key", "test prompt", &[]);
         assert!(matches!(result, Err(RouterError::NoWorkersAvailable)));
     }
 
@@ -269,7 +281,7 @@ mod tests {
     fn round_robin_score_is_always_one() {
         let router = RoundRobinRouter::new();
         let workers = test_workers(2);
-        let decision = router.route("key", &workers).unwrap();
+        let decision = router.route("key", "test prompt", &workers).unwrap();
         assert_eq!(decision.score, 1.0);
     }
 
@@ -290,8 +302,15 @@ mod tests {
         let workers = test_workers(2);
 
         let ingress_event_id: u128 = 42;
-        let (_decision, event) =
-            route_and_log(&router, "replay-key-abc", ingress_event_id, &workers, &log).unwrap();
+        let (_decision, event) = route_and_log(
+            &router,
+            "replay-key-abc",
+            "test prompt",
+            ingress_event_id,
+            &workers,
+            &log,
+        )
+        .unwrap();
 
         // The routing event must list the ingress event as a dependency
         assert_eq!(event.dependency_ids, vec![ingress_event_id]);
@@ -313,7 +332,8 @@ mod tests {
         let router = RoundRobinRouter::new();
         let workers = test_workers(2);
 
-        let (_decision, event) = route_and_log(&router, "test-key", 0u128, &workers, &log).unwrap();
+        let (_decision, event) =
+            route_and_log(&router, "test-key", "test prompt", 0u128, &workers, &log).unwrap();
 
         // The payload must deserialize back to a RoutingDecisionPayload
         let payload: RoutingDecisionPayload = bincode::deserialize(&event.payload).unwrap();

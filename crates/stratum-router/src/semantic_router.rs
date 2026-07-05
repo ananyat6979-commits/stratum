@@ -5,18 +5,18 @@
 //! observations per worker).
 //!
 //! # Pipeline per request
-//! 1. Check backpressure — shed immediately if the SLA bucket is exhausted
-//! 2. Filter to registry-routable workers — only workers explicitly marked
+//! 1. Check backpressure, shed immediately if the SLA bucket is exhausted
+//! 2. Filter to registry-routable workers, only workers explicitly marked
 //!    Unavailable are excluded; a worker absent from the registry is treated
 //!    as routable (registry is opt-in health tracking, not a whitelist)
-//! 3. If a session_id is present, try affinity routing via jump consistent hash
-//!    — route to the affinity worker if it's healthy and its pressure is < 0.8
+//! 3. If a session_id is present, try affinity routing via jump consistent hash,
+//!    route to the affinity worker if it's healthy and its pressure is < 0.8
 //! 4. Otherwise, if no worker has enough oracle observations to be trusted,
 //!    fall back to round-robin so load distribution isn't silently disabled
 //!    during the cold-start window
 //! 5. Otherwise, fetch oracle signals for all routable workers and score them
 //! 6. Select the highest-scoring worker via select_best_worker()
-//! 7. Update the LinUCB bandit with the routing decision (deferred — actual
+//! 7. Update the LinUCB bandit with the routing decision (deferred, actual
 //!    reward requires observing the outcome, so bandit.update() is called by
 //!    the caller after the inference completes, not here)
 //!
@@ -26,9 +26,11 @@
 //! without the oracle running. The HTTP adapter implementing this trait
 //! is added when the oracle HTTP endpoint is wired up in Phase 3b.
 
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::backpressure::{BackpressureController, BackpressureDecision, RouterSlaClass};
+use crate::cache_hit_index::CacheHitIndex;
 use crate::consistent_hash::affinity_bucket;
 use crate::router::{RouterError, RouterStrategy, RoutingDecision, WorkerSpec};
 use crate::scoring::{select_best_worker, RoutingSignals, ScoreWeights};
@@ -112,6 +114,14 @@ pub struct SemanticRouter<P: WorkerSignalsProvider> {
     /// Mirrors RoundRobinRouter's counter design so behavior degrades to
     /// something at least as good as the strategy this one replaces.
     fallback_counter: std::sync::atomic::AtomicU64,
+    /// Per-worker cache-hit indices. Computed locally and synchronously
+    /// -- this signal cannot come from the HTTP-polled signals_provider
+    /// because cache_hit_prob is a (request, worker) pair signal, not
+    /// worker-state. See cache_hit_index.rs's module doc and ADR-009.
+    /// The wire value from signals_provider for cache_hit_prob is
+    /// explicitly discarded and overwritten with this index's result
+    /// -- see route()'s scoring section.
+    cache_hit_indices: Arc<RwLock<HashMap<String, CacheHitIndex>>>,
 }
 
 impl<P: WorkerSignalsProvider> SemanticRouter<P> {
@@ -126,6 +136,7 @@ impl<P: WorkerSignalsProvider> SemanticRouter<P> {
             backpressure,
             weights: Arc::new(RwLock::new(ScoreWeights::equal())),
             fallback_counter: std::sync::atomic::AtomicU64::new(0),
+            cache_hit_indices: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -137,6 +148,33 @@ impl<P: WorkerSignalsProvider> SemanticRouter<P> {
     /// Current score weights (for observability/telemetry).
     pub fn current_weights(&self) -> ScoreWeights {
         *self.weights.read().unwrap()
+    }
+
+    /// Record that a routing decision sent `prompt` to `worker_id`.
+    ///
+    /// MUST be called after route() returns and the request has been
+    /// dispatched -- never from inside route() itself. This keeps
+    /// route() free of mutation, preserving its determinism, and keeps
+    /// the cache-hit index's write path explicit and separate from the
+    /// read (scoring) path used during routing.
+    pub fn record_routing_outcome(&self, worker_id: &str, prompt: &str) {
+        let mut indices = self.cache_hit_indices.write().unwrap();
+        indices
+            .entry(worker_id.to_string())
+            .or_insert_with(CacheHitIndex::with_defaults)
+            .insert(prompt);
+    }
+
+    /// Query the local cache-hit index for a specific worker and prompt.
+    /// Returns 0.0 if this worker has no index yet (nothing routed to it
+    /// so far) -- same "no data, no false positive" default as an empty
+    /// CacheHitIndex.
+    fn local_cache_hit_prob(&self, worker_id: &str, prompt: &str) -> f64 {
+        let indices = self.cache_hit_indices.read().unwrap();
+        indices
+            .get(worker_id)
+            .map(|idx| idx.query(prompt) as f64)
+            .unwrap_or(0.0)
     }
 
     /// Attempt affinity routing for a session.
@@ -159,7 +197,7 @@ impl<P: WorkerSignalsProvider> SemanticRouter<P> {
             return None;
         }
 
-        // Check pressure — don't use affinity if worker is near saturation
+        // Check pressure, don't use affinity if worker is near saturation
         let oracle = oracle_signals
             .iter()
             .find(|s| s.worker_id == affinity_worker.worker_id)?;
@@ -176,6 +214,7 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
     fn route(
         &self,
         replay_key: &str,
+        prompt: &str,
         workers: &[WorkerSpec],
     ) -> Result<RoutingDecision, RouterError> {
         if workers.is_empty() {
@@ -265,11 +304,20 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
         let signals_vec: Vec<RoutingSignals> = oracle_signals
             .iter()
             .map(|s| {
-                if s.n_observations >= MIN_ORACLE_PULLS {
+                let mut signals = if s.n_observations >= MIN_ORACLE_PULLS {
                     s.signals
                 } else {
                     RoutingSignals::neutral()
-                }
+                };
+                // OVERWRITE: cache_hit_prob from the HTTP wire is always a
+                // placeholder (api.py permanently reports 0.0 for this field
+                // -- see cache_hit_index.rs's module doc). Replace it with
+                // the local, synchronous, per-(request,worker) computation,
+                // which is the only architecturally-correct source for this
+                // specific signal. This is intentional, not a bug -- the
+                // wire value is discarded on purpose, every time.
+                signals.cache_hit_prob = self.local_cache_hit_prob(&s.worker_id, prompt);
+                signals
             })
             .collect();
 
@@ -342,7 +390,7 @@ mod tests {
         }));
         let workers = test_workers(3);
         // All workers get same signals; tie-breaks to index 0
-        let decision = router.route("key", &workers).unwrap();
+        let decision = router.route("key", "test prompt", &workers).unwrap();
         assert_eq!(decision.worker.worker_id, "worker-0");
         assert_eq!(router.strategy_name(), "semantic");
     }
@@ -357,7 +405,7 @@ mod tests {
         // distribution guarantee.
         let router = test_router(MockSignalsProvider::neutral());
         let workers = test_workers(3);
-        let d1 = router.route("key", &workers).unwrap();
+        let d1 = router.route("key", "test prompt", &workers).unwrap();
         assert!(d1.reason.contains("fallback"));
     }
 
@@ -365,7 +413,7 @@ mod tests {
     fn no_workers_returns_error() {
         let router = test_router(MockSignalsProvider::neutral());
         assert!(matches!(
-            router.route("key", &[]),
+            router.route("key", "test prompt", &[]),
             Err(RouterError::NoWorkersAvailable)
         ));
     }
@@ -384,9 +432,9 @@ mod tests {
 
         let workers = test_workers(4);
         let key = "session:user-abc:req-001";
-        let d1 = router.route(key, &workers).unwrap();
-        let d2 = router.route(key, &workers).unwrap();
-        let d3 = router.route(key, &workers).unwrap();
+        let d1 = router.route(key, "test prompt", &workers).unwrap();
+        let d2 = router.route(key, "test prompt", &workers).unwrap();
+        let d3 = router.route(key, "test prompt", &workers).unwrap();
 
         assert_eq!(d1.worker.worker_id, d2.worker.worker_id);
         assert_eq!(d2.worker.worker_id, d3.worker.worker_id);
@@ -406,7 +454,7 @@ mod tests {
 
         let workers = test_workers(4);
         let key = "session:user-abc:req-001";
-        let decision = router.route(key, &workers).unwrap();
+        let decision = router.route(key, "test prompt", &workers).unwrap();
         // Should fall through to score-based, not affinity
         assert!(!decision.reason.contains("affinity"));
     }
@@ -448,11 +496,11 @@ mod tests {
         let workers = test_workers(2);
 
         // First request consumes the single token
-        let first = router.route("sla:realtime:req-1", &workers);
+        let first = router.route("sla:realtime:req-1", "test prompt", &workers);
         assert!(first.is_ok());
 
         // Second immediate request should be shed
-        let second = router.route("sla:realtime:req-2", &workers);
+        let second = router.route("sla:realtime:req-2", "test prompt", &workers);
         assert!(matches!(second, Err(RouterError::NoWorkersAvailable)));
     }
 
@@ -492,7 +540,7 @@ mod tests {
         );
 
         for _ in 0..10 {
-            let decision = router.route("key", &workers).unwrap();
+            let decision = router.route("key", "test prompt", &workers).unwrap();
             assert_ne!(
                 decision.worker.worker_id, "worker-0",
                 "Unavailable worker must never be selected"
@@ -507,7 +555,7 @@ mod tests {
 
         let mut counts = [0usize; 3];
         for _ in 0..30 {
-            let decision = router.route("key", &workers).unwrap();
+            let decision = router.route("key", "test prompt", &workers).unwrap();
             let idx = workers
                 .iter()
                 .position(|w| w.worker_id == decision.worker.worker_id)
@@ -520,6 +568,81 @@ mod tests {
             counts,
             [10, 10, 10],
             "pre-warmup fallback must distribute evenly, not pin to worker[0]"
+        );
+    }
+
+    #[test]
+    fn cache_hit_prob_from_history_influences_selection() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let bp = Arc::new(BackpressureController::with_defaults());
+        let router = SemanticRouter::new(
+            registry,
+            Arc::new(MockSignalsProvider::warmed(RoutingSignals::neutral())),
+            bp,
+        );
+        let workers = test_workers(2);
+
+        // Record that "worker-1" recently handled a very similar prompt
+        router.record_routing_outcome("worker-1", "What is the capital of France?");
+
+        // A near-identical prompt should now favor worker-1 via cache_hit_prob,
+        // even though the HTTP-sourced signals are identical (neutral) for both
+        let decision = router
+            .route("key", "What is the capital of France?", &workers)
+            .unwrap();
+
+        assert_eq!(
+            decision.worker.worker_id, "worker-1",
+            "worker with matching cache-hit history should be preferred"
+        );
+    }
+
+    #[test]
+    fn cache_hit_prob_defaults_to_zero_for_worker_with_no_history() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let bp = Arc::new(BackpressureController::with_defaults());
+        let router = SemanticRouter::new(
+            registry,
+            Arc::new(MockSignalsProvider::warmed(RoutingSignals::neutral())),
+            bp,
+        );
+
+        // No record_routing_outcome calls -- both workers have no history
+        let prob = router.local_cache_hit_prob("worker-0", "any prompt");
+        assert_eq!(prob, 0.0);
+    }
+
+    #[test]
+    fn wire_cache_hit_prob_is_overwritten_not_trusted() {
+        // Even if the MockSignalsProvider returns a HIGH cache_hit_prob on
+        // the wire, route() must overwrite it with the local computation
+        // (which will be 0.0 for an unrecorded prompt) -- proving the
+        // wire value is genuinely discarded, not accidentally blended in.
+        let registry = Arc::new(WorkerRegistry::new());
+        let bp = Arc::new(BackpressureController::with_defaults());
+        let router = SemanticRouter::new(
+            registry,
+            Arc::new(MockSignalsProvider::warmed(RoutingSignals {
+                cache_hit_prob: 0.99, // wire says "definitely a hit" -- must be ignored
+                predicted_latency_ms: 50.0,
+                sla_affinity: 0.5,
+                kv_pressure: 0.1,
+            })),
+            bp,
+        );
+        let workers = test_workers(1);
+
+        // No routing history recorded for worker-0 -- local computation
+        // must yield 0.0, overriding the wire's 0.99
+        let decision = router.route("key", "unrecorded prompt", &workers).unwrap();
+        // With only one worker, this always "succeeds" at selecting it --
+        // the real assertion is in the score, which should reflect the
+        // OVERWRITTEN cache_hit_prob=0.0, not the wire's 0.99
+        assert!(
+            decision.score < 0.9,
+            "score should reflect the overwritten (0.0) cache_hit_prob, \
+             not the untrusted wire value (0.99); got score {}",
+            decision.score
         );
     }
 }

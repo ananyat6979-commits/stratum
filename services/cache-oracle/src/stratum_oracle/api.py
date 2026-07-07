@@ -9,20 +9,27 @@ SCOPE (honest, per ADR-007)
 ============================
 Only kv_pressure has a real producer (KvPressurePredictor via
 MetricsCollector). predicted_latency_ms and sla_affinity have no
-implementation anywhere in this service -- this endpoint returns
+implementation anywhere in this service, this endpoint returns
 neutral placeholder values for them, explicitly labeled as such in
 the response, not silently defaulted.
 
-cache_hit_prob is also unimplemented pending the FAISS IVF-PQ index
-(Phase 3 next step). Returned as 0.0 (neutral/no-signal), also
-explicitly labeled.
+cache_hit_prob is PERMANENTLY 0.0 / cache_hit_prob_is_real: False on
+this endpoint, by design, not pending future work. See ADR-009:
+cache_hit_prob is a (request, worker) pair signal, not worker-state,
+and cannot be honestly answered by a fixed-interval snapshot poll with
+no knowledge of the next request's content. It is computed locally
+and synchronously in stratum-router (crates/stratum-router/src/
+cache_hit_index.rs) instead. The Python CacheHitIndex/embedding.py in
+this service are a validated reference prototype (see their own
+module docstrings), not dead code awaiting integration, do not wire
+them into this endpoint.
 
 WHY POLLING, NOT REQUEST-RESPONSE PER ROUTING DECISION
 =========================================================
 stratum-router's RouterStrategy::route() has a documented contract:
 must never block indefinitely, must be deterministic given the same
 inputs and internal state, and is called on the request hot path.
-A live HTTP call per routing decision would violate all three --
+A live HTTP call per routing decision would violate all three,
 network jitter breaks determinism, a slow/down oracle would block
 routing, and per-request HTTP round-trips add latency to every
 request regardless of whether cache-oracle is even needed for that
@@ -34,7 +41,7 @@ fixed interval (default 2s) in a background task and caches the
 result. signals_for_workers() reads synchronously from that cache,
 satisfying the trait's non-blocking/deterministic contract. Staleness
 is handled by falling back to neutral() signals if the last successful
-poll exceeds a max-age threshold -- see stratum-router's
+poll exceeds a max-age threshold, see stratum-router's
 HttpSignalsProvider implementation.
 """
 
@@ -125,7 +132,7 @@ async def get_signals() -> SignalsSnapshotResponse:
     for worker_id in collector._worker_addresses.keys():
         metrics = collector.get_metrics(worker_id)
         if metrics is None:
-            # Not yet scraped -- return neutral, n_observations=0 so the
+            # Not yet scraped, return neutral, n_observations=0 so the
             # Rust side's MIN_ORACLE_PULLS check correctly treats this
             # as unwarmed rather than trusting a zero-pressure reading.
             workers_out.append(

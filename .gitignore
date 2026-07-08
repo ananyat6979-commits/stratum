@@ -1,6 +1,5 @@
 # Rust
 target/
-Cargo.lock   # keep this for binaries, remove for libs — leave for now
 
 # Python
 .venv/
@@ -15,8 +14,9 @@ vendor/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local engineering journal, not part of the public deliverable
 skills.md
 
-crates/gateway_event_log.redb
+# Runtime-generated event log databases (test and manual-run artifacts)
 *.redb
-crates/gateway_event_log.redb

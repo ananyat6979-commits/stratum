@@ -1338,10 +1338,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "stratum-replay",
+ "stratum-router",
  "tokio",
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

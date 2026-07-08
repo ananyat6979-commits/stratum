@@ -21,7 +21,9 @@ async fn main() {
 
     println!("stratum-router manual verification");
     println!("Polling cache-oracle at {base_url} every {poll_interval:?}");
-    println!("(make sure cache-oracle is running: uv run uvicorn stratum_oracle.api:app --port 8001)");
+    println!(
+        "(make sure cache-oracle is running: uv run uvicorn stratum_oracle.api:app --port 8001)"
+    );
     println!();
 
     let provider = HttpSignalsProvider::new(base_url, poll_interval, max_staleness);

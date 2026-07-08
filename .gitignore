@@ -16,3 +16,7 @@ vendor/
 .DS_Store
 Thumbs.db
 skills.md
+
+crates/gateway_event_log.redb
+
+crates/gateway_event_log.redb

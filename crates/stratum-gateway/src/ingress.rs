@@ -29,6 +29,9 @@ use axum::routing::post;
 use axum::Router;
 use serde_json::json;
 
+use stratum_replay::event_log::AppendOnlyEventLog;
+use stratum_router::router::{route_and_log, RoundRobinRouter, RouterStrategy, WorkerSpec};
+
 use crate::proto::{to_inference_request, OpenAiCompatRequest};
 use crate::rate_limit::RateLimiter;
 use crate::sla::assign_sla_class;
@@ -40,13 +43,38 @@ use crate::sla::assign_sla_class;
 pub struct AppState {
     pub rate_limiter: Arc<RateLimiter>,
     pub node_id: Arc<str>,
+    /// The active routing strategy. RoundRobinRouter for now, gateway
+    /// doesn't manage a running cache-oracle instance, so SemanticRouter
+    /// (which needs live oracle signals to be meaningful) is not yet the
+    /// default here. Swapping this to SemanticRouter is a future step
+    /// once the gateway has a real worker registry and oracle connection.
+    pub router: Arc<dyn RouterStrategy>,
+    /// The event log this gateway writes routing decisions to. Shared
+    /// across requests, wrapped in Arc since AppState is cloned per-request
+    /// by Axum's Router::with_state.
+    pub event_log: Arc<AppendOnlyEventLog>,
+    /// Static worker list for now, no real worker registry/health
+    /// checking wired into the gateway yet. This is a known, deliberate
+    /// simplification: routing logic is being proven correct end-to-end
+    /// before worker discovery/health machinery is added on top of it.
+    pub workers: Vec<WorkerSpec>,
 }
 
 impl AppState {
-    pub fn new(node_id: impl Into<Arc<str>>) -> Self {
+    pub fn new(
+        node_id: impl Into<Arc<str>>,
+        event_log_path: impl AsRef<std::path::Path>,
+        workers: Vec<WorkerSpec>,
+    ) -> Self {
+        let event_log = AppendOnlyEventLog::open(event_log_path, "gateway-node-0")
+            .expect("failed to open event log, check the path is writable");
+
         Self {
             rate_limiter: Arc::new(RateLimiter::with_defaults()),
             node_id: node_id.into(),
+            router: Arc::new(RoundRobinRouter::new()),
+            event_log: Arc::new(event_log),
+            workers,
         }
     }
 }
@@ -148,16 +176,62 @@ async fn handle_chat_completions(
         "request accepted"
     );
 
-    // Stub response: no router/worker exists yet to forward this to.
-    // Phase 2 replaces this block with a gRPC call to stratum-router and
-    // returns its actual inference result instead.
+    // Extract prompt text for routing. InferenceRequest's `prompt` field
+    // (built by proto.rs's transcoding) is what SemanticRouter-family
+    // strategies would use for cache-hit similarity; RoundRobinRouter
+    // (the current default) ignores it entirely.
+    let prompt_text = &inference_request.prompt;
+
+    // Route the request. ingress_event_id=0 for now, this gateway
+    // does not yet write a RequestIngressEvent to the log before routing
+    // (that's the full causal.proto RFC-001 wiring, not yet built here).
+    // Using 0 as a placeholder dependency means routing decisions in
+    // the event log currently have no real causal parent; this is a
+    // known simplification, not a correctness claim about causal chains.
+    let (routing_decision, _event) = match route_and_log(
+        state.router.as_ref(),
+        &inference_request.replay_key,
+        prompt_text,
+        0u128,
+        &state.workers,
+        &state.event_log,
+    ) {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::warn!(error = %e, "routing failed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": format!("routing failed: {e}"),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // No real worker dispatch yet, stratum-gateway does not forward
+    // HTTP requests to Ollama/vLLM workers as of this commit. This is
+    // the next integration slice after this one.
+    //
+    // record_routing_outcome() is NOT called here yet. Per ADR-009, it
+    // must be called on SemanticRouter specifically after a request is
+    // dispatched, but RoundRobinRouter (this gateway's current default
+    // strategy) has no cache-hit index to populate, and downcasting
+    // from `dyn RouterStrategy` to check for SemanticRouter at runtime
+    // would be solving a problem this commit doesn't have yet. Wire
+    // this call in when SemanticRouter becomes the gateway's active
+    // strategy, not before. Tracked as a known gap in ADR-009.
+
     (
         StatusCode::OK,
         Json(json!({
             "replay_key": inference_request.replay_key,
             "sla_class": sla_class.as_str(),
             "prompt_echo": inference_request.prompt,
-            "status": "accepted_no_router_yet",
+            "routed_to_worker": routing_decision.worker.worker_id,
+            "routing_score": routing_decision.score,
+            "routing_reason": routing_decision.reason,
+            "status": "routed_no_dispatch_yet",
         })),
     )
         .into_response()
@@ -171,7 +245,15 @@ mod tests {
     use tower::ServiceExt; // for `oneshot`
 
     fn test_state() -> AppState {
-        AppState::new("test-node-0")
+        let log_path = std::env::temp_dir().join(format!(
+            "stratum-gateway-test-{}.redb",
+            uuid::Uuid::new_v4()
+        ));
+        AppState::new(
+            "test-node-0",
+            log_path,
+            vec![WorkerSpec::new("worker-0", "http://127.0.0.1:11434")],
+        )
     }
 
     fn json_request(body: &str, auth: Option<&str>) -> Request<Body> {
@@ -213,7 +295,7 @@ mod tests {
     async fn missing_messages_field_returns_400() {
         let app = build_router(test_state());
         // "messages" is a required field on OpenAiCompatRequest with no
-        // #[serde(default)] -- omitting it must fail to parse, not panic
+        // #[serde(default)], omitting it must fail to parse, not panic
         // or silently default to an empty prompt.
         let body = r#"{"model":"phi3:mini"}"#;
 

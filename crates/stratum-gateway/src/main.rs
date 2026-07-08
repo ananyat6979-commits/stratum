@@ -11,11 +11,15 @@
 
 use stratum_gateway::ingress::{build_router, AppState};
 use stratum_gateway::telemetry::init_telemetry;
+use stratum_router::router::WorkerSpec;
 
 #[tokio::main]
 async fn main() {
     init_telemetry();
-    let state = AppState::new("gateway-node-0");
+
+    let workers = vec![WorkerSpec::new("worker-0", "http://127.0.0.1:11434")];
+
+    let state = AppState::new("gateway-node-0", "gateway_event_log.redb", workers);
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080")

@@ -1335,6 +1335,7 @@ dependencies = [
  "prost",
  "prost-build",
  "protox",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

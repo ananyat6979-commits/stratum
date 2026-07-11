@@ -2,14 +2,14 @@
 //! rate limiting, and proto transcoding into a running Axum server.
 //!
 //! # Pipeline (strict order)
-//! 1. Read raw body bytes (required before parsing — see ADR-003)
+//! 1. Read raw body bytes (required before parsing, see ADR-003)
 //! 2. Extract `Authorization` header
 //! 3. Parse JSON body into [`crate::proto::OpenAiCompatRequest`]
 //! 4. Assign SLA class from the auth header (via `proto::to_inference_request`,
 //!    which internally calls `sla::assign_sla_class`)
-//! 5. Check the rate limiter for that SLA class — reject with 429 if exhausted
+//! 5. Check the rate limiter for that SLA class, reject with 429 if exhausted
 //! 6. Build the `InferenceRequest` proto (signs `replay_key` from raw bytes)
-//! 7. Return a stub response — there is no router/worker yet to forward to.
+//! 7. Return a stub response, there is no router/worker yet to forward to.
 //!    Phase 2 replaces step 7 with an actual gRPC call to `stratum-router`.
 //!
 //! # Why raw bytes are read manually, not via Axum's `Json<T>` extractor
@@ -19,7 +19,7 @@
 //! `serde_json::from_slice`.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -38,7 +38,7 @@ use crate::sla::assign_sla_class;
 
 /// Shared state injected into every request handler via Axum's `State`
 /// extractor. `Arc`-wrapped so cloning it per-request is cheap (refcount
-/// bump only) — the `RateLimiter` itself is internally mutex-guarded.
+/// bump only): the `RateLimiter` itself is internally mutex-guarded.
 #[derive(Clone)]
 pub struct AppState {
     pub rate_limiter: Arc<RateLimiter>,
@@ -58,6 +58,11 @@ pub struct AppState {
     /// simplification: routing logic is being proven correct end-to-end
     /// before worker discovery/health machinery is added on top of it.
     pub workers: Vec<WorkerSpec>,
+    /// HTTP client used to dispatch requests to the routed worker.
+    /// Constructed once and cloned (reqwest::Client is internally
+    /// Arc-wrapped, so cloning is cheap) rather than built per-request,
+    /// which would discard connection pooling on every call.
+    pub worker_client: reqwest::Client,
 }
 
 impl AppState {
@@ -69,12 +74,18 @@ impl AppState {
         let event_log = AppendOnlyEventLog::open(event_log_path, "gateway-node-0")
             .expect("failed to open event log, check the path is writable");
 
+        let worker_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("failed to build worker HTTP client");
+
         Self {
             rate_limiter: Arc::new(RateLimiter::with_defaults()),
             node_id: node_id.into(),
             router: Arc::new(RoundRobinRouter::new()),
             event_log: Arc::new(event_log),
             workers,
+            worker_client,
         }
     }
 }
@@ -94,7 +105,7 @@ pub fn build_router(state: AppState) -> Router {
 ///
 /// Separated into its own function so tests can verify handler logic
 /// without depending on real time passing between request construction
-/// and handler execution — though for this handler, only `proto.rs`'s
+/// and handler execution, though for this handler, only `proto.rs`'s
 /// determinism tests (which take an explicit timestamp parameter) need
 /// that control. This function is the one and only place "real now"
 /// enters the gateway.
@@ -107,7 +118,7 @@ fn now_ns() -> i64 {
 
 /// Extracts the `Authorization` header value as a `&str`, if present and
 /// valid UTF-8. Malformed (non-UTF-8) header values are treated as absent
-/// — `sla::assign_sla_class` already treats `None` as BATCH, so this is
+/// , `sla::assign_sla_class` already treats `None` as BATCH, so this is
 /// a safe fallback rather than a special error path.
 fn extract_auth_header(headers: &HeaderMap) -> Option<&str> {
     headers.get("authorization")?.to_str().ok()
@@ -117,7 +128,7 @@ fn extract_auth_header(headers: &HeaderMap) -> Option<&str> {
 ///
 /// # Cancellation safety
 /// This handler performs no partial side effects before its first `await`
-/// point that would need cleanup if cancelled — rate limiting (`check`) is
+/// point that would need cleanup if cancelled, rate limiting (`check`) is
 /// synchronous and either fully succeeds or fully fails atomically, and
 /// no I/O occurs before it. If the client disconnects after rate limiting
 /// succeeds but before the response is sent, the consumed token is not
@@ -145,7 +156,7 @@ async fn handle_chat_completions(
     // (to decide rate limiting) and once inside to_inference_request (to
     // populate the proto field). Both calls are pure and deterministic
     // over the same auth_header, so this is intentional duplication for
-    // clarity, not a correctness risk — assign_sla_class has no side
+    // clarity, not a correctness risk, assign_sla_class has no side
     // effects and is cheap (a few string comparisons).
     let sla_class = assign_sla_class(auth_header);
 
@@ -222,19 +233,90 @@ async fn handle_chat_completions(
     // this call in when SemanticRouter becomes the gateway's active
     // strategy, not before. Tracked as a known gap in ADR-009.
 
-    (
-        StatusCode::OK,
-        Json(json!({
-            "replay_key": inference_request.replay_key,
-            "sla_class": sla_class.as_str(),
-            "prompt_echo": inference_request.prompt,
-            "routed_to_worker": routing_decision.worker.worker_id,
-            "routing_score": routing_decision.score,
-            "routing_reason": routing_decision.reason,
-            "status": "routed_no_dispatch_yet",
-        })),
-    )
-        .into_response()
+    // Dispatch to the routed worker. Forwards the already-parsed request
+    // as an Ollama-compatible /api/generate call. Worker unreachability
+    // (connection refused, timeout, non-2xx) is a real, expected failure
+    // mode in dev -- no assumption here that a worker is actually running.
+    let worker_url = format!("{}/api/generate", routing_decision.worker.address);
+    let worker_payload = json!({
+        "model": parsed.model,
+        "prompt": inference_request.prompt,
+        "stream": false,
+    });
+
+    let dispatch_result = state
+        .worker_client
+        .post(&worker_url)
+        .json(&worker_payload)
+        .send()
+        .await;
+
+    match dispatch_result {
+        Ok(worker_response) if worker_response.status().is_success() => {
+            let worker_body: serde_json::Value = worker_response
+                .json()
+                .await
+                .unwrap_or_else(|_| json!({"error": "worker returned non-JSON response"}));
+
+            tracing::info!(
+                stratum.replay_key = %inference_request.replay_key,
+                stratum.routed_to_worker = %routing_decision.worker.worker_id,
+                "request dispatched successfully"
+            );
+
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "replay_key": inference_request.replay_key,
+                    "sla_class": sla_class.as_str(),
+                    "routed_to_worker": routing_decision.worker.worker_id,
+                    "routing_score": routing_decision.score,
+                    "routing_reason": routing_decision.reason,
+                    "status": "dispatched",
+                    "worker_response": worker_body,
+                })),
+            )
+                .into_response()
+        }
+        Ok(worker_response) => {
+            let status = worker_response.status();
+            tracing::warn!(
+                stratum.replay_key = %inference_request.replay_key,
+                stratum.routed_to_worker = %routing_decision.worker.worker_id,
+                worker_status = %status,
+                "worker returned non-success status"
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": format!("worker returned status {status}"),
+                    "replay_key": inference_request.replay_key,
+                    "routed_to_worker": routing_decision.worker.worker_id,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            // Expected in dev: no worker running at routing_decision.worker.address.
+            // Not a bug -- a real, honest failure mode being surfaced correctly
+            // rather than papered over with a fake success response.
+            tracing::warn!(
+                stratum.replay_key = %inference_request.replay_key,
+                stratum.routed_to_worker = %routing_decision.worker.worker_id,
+                error = %e,
+                "worker dispatch failed"
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": format!("worker unreachable: {e}"),
+                    "replay_key": inference_request.replay_key,
+                    "routed_to_worker": routing_decision.worker.worker_id,
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -256,6 +338,25 @@ mod tests {
         )
     }
 
+    /// Test state with a deliberately invalid worker address (port 0 is
+    /// never a valid connection target). Used for tests that need dispatch
+    /// to fail FAST and DETERMINISTICALLY -- unlike a real connection-refused
+    /// round trip to an unused local port, which still takes measurable
+    /// wall-clock time and can introduce enough timing variance to affect
+    /// rate-limiter tests that run many requests in a tight loop (the
+    /// bucket refills lazily based on elapsed time -- see rate_limit.rs).
+    fn test_state_with_unreachable_worker() -> AppState {
+        let log_path = std::env::temp_dir().join(format!(
+            "stratum-gateway-test-unreachable-{}.redb",
+            uuid::Uuid::new_v4()
+        ));
+        AppState::new(
+            "test-node-0",
+            log_path,
+            vec![WorkerSpec::new("worker-0", "http://127.0.0.1:0")],
+        )
+    }
+
     fn json_request(body: &str, auth: Option<&str>) -> Request<Body> {
         let mut builder = Request::builder()
             .method("POST")
@@ -270,14 +371,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn valid_request_returns_200() {
+    async fn valid_request_without_running_worker_returns_502() {
+        // No real Ollama/vLLM worker is running in this test environment --
+        // this is a genuine, expected failure mode (worker unreachable),
+        // not a gap in the gateway's logic. Confirms the gateway correctly
+        // surfaces a real dispatch failure rather than papering over it
+        // with a fake success response.
         let app = build_router(test_state());
         let body =
             r#"{"model":"phi3:mini","messages":[{"role":"user","content":"hi"}],"max_tokens":50}"#;
 
         let response = app.oneshot(json_request(body, None)).await.unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]
@@ -308,7 +414,7 @@ mod tests {
     async fn realtime_class_rate_limit_exhausts_after_default_capacity() {
         // Default REALTIME bucket capacity is 10 (see rate_limit::RateLimiter::with_defaults).
         // The 11th immediate request must be rejected with 429.
-        let state = test_state();
+        let state = test_state_with_unreachable_worker();
         let body =
             r#"{"model":"phi3:mini","messages":[{"role":"user","content":"hi"}],"max_tokens":50}"#;
 
@@ -320,8 +426,8 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 response.status(),
-                StatusCode::OK,
-                "request {i} should succeed within capacity"
+                StatusCode::BAD_GATEWAY,
+                "request {i} should pass rate limiting and reach dispatch (which fails, no worker running)"
             );
         }
 
@@ -344,7 +450,7 @@ mod tests {
         // clones into each call) must NOT reset the underlying RateLimiter,
         // since it's Arc-wrapped. Exhaust REALTIME, confirm BATCH is unaffected
         // using the SAME AppState instance across both routers.
-        let state = test_state();
+        let state = test_state_with_unreachable_worker();
         let body =
             r#"{"model":"phi3:mini","messages":[{"role":"user","content":"hi"}],"max_tokens":50}"#;
 
@@ -369,8 +475,41 @@ mod tests {
             .unwrap();
         assert_eq!(
             batch_response.status(),
-            StatusCode::OK,
-            "BATCH bucket must be unaffected by REALTIME exhaustion"
+            StatusCode::BAD_GATEWAY,
+            "BATCH bucket must be unaffected by REALTIME exhaustion \
+             (reaches dispatch, which fails fast -- port 0 is never valid -- \
+             rather than being rejected by rate limiting)"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limiting_rejects_before_attempting_dispatch() {
+        // Isolates the rate-limiter's own behavior from dispatch outcome:
+        // the 11th REALTIME request must be rejected with 429 specifically,
+        // not 502 -- proving rate limiting happens strictly before dispatch
+        // is attempted, regardless of whether a worker is reachable.
+        let state = test_state_with_unreachable_worker();
+        let body =
+            r#"{"model":"phi3:mini","messages":[{"role":"user","content":"hi"}],"max_tokens":50}"#;
+
+        for _ in 0..10 {
+            let app = build_router(state.clone());
+            app.oneshot(json_request(body, Some("Bearer rt-abc123")))
+                .await
+                .unwrap();
+        }
+
+        let app = build_router(state.clone());
+        let response = app
+            .oneshot(json_request(body, Some("Bearer rt-abc123")))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "11th request must be 429 (rate limited), not 502 (dispatch failure) -- \
+             proving rate limiting happens before dispatch is attempted"
         );
     }
 }

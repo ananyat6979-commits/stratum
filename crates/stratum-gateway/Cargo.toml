@@ -16,6 +16,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 stratum-router = { path = "../stratum-router" }
 stratum-replay = { path = "../stratum-replay" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [build-dependencies]
 prost-build = "0.13"

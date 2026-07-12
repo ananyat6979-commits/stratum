@@ -74,6 +74,7 @@ def load_scenario(path: Path) -> dict:
 
 def build_load_config(scenario: dict) -> LoadConfig:
     """Build a LoadConfig from a scenario dict."""
+    expected_codes = scenario.get("expected_status_codes")
     return LoadConfig(
         target_url=scenario["target_url"],
         request_body=json.dumps(scenario["request_body"]),
@@ -81,6 +82,7 @@ def build_load_config(scenario: dict) -> LoadConfig:
         duration_seconds=int(scenario["duration_seconds"]),
         warmup_seconds=int(scenario["warmup_seconds"]),
         auth_header=scenario.get("auth_header"),
+        expected_status_codes=set(expected_codes) if expected_codes else None,
     )
 
 

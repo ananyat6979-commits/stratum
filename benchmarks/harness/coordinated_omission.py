@@ -48,12 +48,17 @@ class RawMeasurement:
     actual_response_time_s: when the response actually completed.
     status_code: HTTP response status.
     error: if set, the request failed with this message (no status_code).
+    expected_status_codes: if set, overrides the default is_success check
+        so a benchmark can deliberately measure a non-2xx outcome (e.g.
+        dispatch-failure latency, where every response is a legitimate,
+        expected 502).
     """
 
     intended_issue_time_s: float
     actual_response_time_s: float
     status_code: Optional[int]
     error: Optional[str] = None
+    expected_status_codes: Optional[set[int]] = None
 
     @property
     def observed_latency_ms(self) -> float:
@@ -62,7 +67,20 @@ class RawMeasurement:
 
     @property
     def is_success(self) -> bool:
-        return self.status_code is not None and self.status_code < 500
+        """
+        True if this measurement should be included in latency statistics.
+
+        Default: any status code < 500 (standard "not a server error").
+        Overridden per-scenario via LoadConfig.expected_status_codes when
+        a benchmark is deliberately measuring a non-2xx outcome (e.g.
+        dispatch-failure latency, where every response is a legitimate,
+        expected 502, see gateway_dispatch_round_robin_baseline.yaml).
+        """
+        if self.status_code is None:
+            return False
+        if self.expected_status_codes is not None:
+            return self.status_code in self.expected_status_codes
+        return self.status_code < 500
 
 
 @dataclass
@@ -121,6 +139,7 @@ class LoadConfig:
     auth_header: Optional[str] = None
     content_type: str = "application/json"
     timeout_s: float = 10.0
+    expected_status_codes: Optional[set[int]] = None
     # Derived/populated automatically at run time
     hostname: str = field(default_factory=socket.gethostname)
     os_platform: str = field(default_factory=platform.platform)
@@ -196,6 +215,7 @@ async def _run_load_async(config: LoadConfig) -> LoadResult:
                     intended_issue_time_s=intended,
                     actual_response_time_s=time.monotonic(),
                     status_code=response.status_code,
+                    expected_status_codes=config.expected_status_codes,
                 )
             except Exception as e:
                 measurement = RawMeasurement(
@@ -203,6 +223,7 @@ async def _run_load_async(config: LoadConfig) -> LoadResult:
                     actual_response_time_s=time.monotonic(),
                     status_code=None,
                     error=str(e),
+                    expected_status_codes=config.expected_status_codes,
                 )
 
             if now < warmup_end:

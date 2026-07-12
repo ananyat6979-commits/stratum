@@ -1,0 +1,60 @@
+{
+  "scenario": "gateway_dispatch_round_robin_baseline",
+  "run_id": "feb6ab54",
+  "git_sha": "00ba49d",
+  "timestamp": "2026-07-12T10:39:41.215106+00:00",
+  "hostname": "DESKTOP-DHD56C6",
+  "os_platform": "Windows-10-10.0.22631-SP0",
+  "config": {
+    "target_url": "http://127.0.0.1:8080/v1/chat/completions",
+    "arrival_rate_rps": 0.4,
+    "duration_seconds": 30,
+    "warmup_seconds": 5,
+    "auth_header": null
+  },
+  "summary": {
+    "n_requests_sent": 13,
+    "n_success": 13,
+    "error_rate": 0.0,
+    "actual_rps": 0.3506027670649138,
+    "n_co_corrected_measurements": 13,
+    "percentiles_ms": {
+      "p50": {
+        "estimate": 2079.0000000001783,
+        "ci_lower": 2079.0000000001783,
+        "ci_upper": 2094.000000000051,
+        "confidence_level": 0.95
+      },
+      "p75": {
+        "estimate": 2094.000000000051,
+        "ci_lower": 2079.0000000001783,
+        "ci_upper": 2110.0000000001273,
+        "confidence_level": 0.95
+      },
+      "p95": {
+        "estimate": 2122.400000000107,
+        "ci_lower": 2085.0000000001273,
+        "ci_upper": 2141.0000000000764,
+        "confidence_level": 0.95
+      },
+      "p99": {
+        "estimate": 2137.2800000000825,
+        "ci_lower": 2092.200000000066,
+        "ci_upper": 2141.0000000000764,
+        "confidence_level": 0.95
+      },
+      "p999": {
+        "estimate": 2140.628000000077,
+        "ci_lower": 2093.8200000000525,
+        "ci_upper": 2141.0000000000764,
+        "confidence_level": 0.95
+      },
+      "mean": {
+        "estimate": 2086.000000000135,
+        "ci_lower": 2074.076923077078,
+        "ci_upper": 2098.0269230770537,
+        "confidence_level": 0.95
+      }
+    }
+  }
+}

@@ -1,0 +1,99 @@
+# STRATUM Benchmark Scenario: Gateway + Real Dispatch (RoundRobinRouter)
+#
+# PURPOSE
+# -------
+# Establishes the Phase 3 baseline: full gateway pipeline including a
+# REAL routing decision (RoundRobinRouter, via stratum-router) and a
+# REAL HTTP dispatch attempt to a worker address, as opposed to the
+# Phase 1 baseline's stub response with no routing or dispatch at all.
+#
+# WHAT THIS MEASURES: READ BEFORE INTERPRETING RESULTS
+# =========================================================
+# No real Ollama/vLLM worker is running at the configured worker
+# address for this benchmark run. Every request will receive a 502
+# (worker unreachable) after a real, bounded dispatch attempt.
+#
+# This means the reported latency numbers are NOT end-to-end inference
+# latency. They measure:
+#   1. Gateway-internal overhead (signing, SLA classification, rate
+#      limiting, routing decision, event log write), same category
+#      as the Phase 1 baseline
+#   2. PLUS the real wall-clock cost of attempting and failing an HTTP
+#      connection to an unreachable worker address (dominated by the
+#      OS-level TCP connection-refused/timeout behavior, empirically
+#      observed around ~2s in manual testing on this Windows dev
+#      machine, NOT stratum-gateway's configured 30s reqwest timeout,
+#      which is a much longer upper bound that this scenario does not
+#      exercise)
+#
+# This is still a legitimate and useful benchmark: it proves dispatch
+# failure is bounded and measurable rather than hanging indefinitely,
+# and it establishes the "gateway + routing decision + dispatch
+# attempt" overhead baseline that a REAL worker's inference latency
+# will be added on top of once one is available. It is explicitly NOT
+# a measurement of inference performance, cache-hit routing quality,
+# or anything SemanticRouter-related, RoundRobinRouter is the active
+# strategy here (see stratum-gateway's AppState::new(), which defaults
+# to RoundRobinRouter, SemanticRouter is not yet wired into the
+# gateway, per ADR-009's tracked gap).
+#
+# WORKLOAD
+# --------
+# Lower arrival rate and shorter duration than the Phase 1 baseline,
+# specifically because each request now takes seconds (dispatch
+# failure latency) rather than milliseconds (stub response). Running
+# the Phase 1 baseline's 50 RPS / 60s workload here would queue
+# thousands of in-flight failed dispatches simultaneously, which
+# would measure connection-pool/resource-exhaustion behavior instead
+# of the intended per-request dispatch-failure latency. 0.4 RPS / 30s
+# keeps concurrent in-flight requests low and the measurement clean.
+# See ARRIVAL RATE CALIBRATION below for why 0.4 RPS specifically.
+#
+# ARRIVAL RATE CALIBRATION
+# --------------------------
+# 0.4 RPS (2.5s inter-arrival) chosen empirically: manual testing showed
+# ~2.1-2.2s real dispatch-failure latency per request. This harness's
+# load loop is strictly sequential (single await per request, not
+# concurrent request spawning) -- at any arrival_rate_rps implying an
+# inter-arrival time shorter than the real per-request latency, the
+# loop falls permanently behind schedule, and observed_latency_ms
+# (measured from intended_issue_time, not actual_send_time) silently
+# accumulates that scheduling drift as if it were real latency. An
+# earlier attempt at 2 RPS (0.5s inter-arrival) against ~2.1s real
+# latency produced a nonsensical ~18s P50 -- accumulated drift, not
+# real dispatch latency. 0.4 RPS gives ~300-400ms of headroom per
+# request so the schedule can actually keep pace.
+#
+# COORDINATED OMISSION
+# ---------------------
+# Still enabled, per project-wide benchmarking standard (see
+# benchmarks/README.md). At this arrival rate and expected per-request
+# latency, CO correction should have minimal effect (little to no
+# server-side queueing expected), but it stays on for methodological
+# consistency across all STRATUM benchmarks, not because it is
+# expected to change the result materially here.
+#
+# EXPECTED STATUS CODES
+# ----------------------
+# No worker is running at the configured address, so every request
+# legitimately returns 502 (worker unreachable) -- this IS the
+# expected, correct outcome being measured (dispatch-failure latency),
+# not a failure to exclude from statistics. Without this override,
+# the harness's default is_success check (status < 500) would exclude
+# every single measurement and the benchmark would report zero data.
+
+name: gateway_dispatch_round_robin_baseline
+target_url: "http://127.0.0.1:8080/v1/chat/completions"
+arrival_rate_rps: 0.4
+duration_seconds: 30
+warmup_seconds: 5
+expected_status_codes: [502]
+
+request_body:
+  model: "phi3:mini"
+  messages:
+    - role: "user"
+      content: "What is 2+2?"
+  max_tokens: 50
+
+auth_header: null

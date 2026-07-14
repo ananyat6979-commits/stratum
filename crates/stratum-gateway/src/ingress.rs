@@ -73,9 +73,17 @@ impl AppState {
     ) -> Self {
         let event_log = AppendOnlyEventLog::open(event_log_path, "gateway-node-0")
             .expect("failed to open event log, check the path is writable");
-
+        // 120s, not 30s. Measured on real hardware: phi3:mini on this dev
+        // machine (CPU-only inference, no GPU acceleration active per
+        // Ollama's own startup log) takes ~83s total for a 69-token warm
+        // response (~1.1s/token, see skills.md). The original 30s was an
+        // unmeasured default set before any real inference workload existed
+        // to calibrate against -- every gateway-mediated request against a
+        // real worker on this hardware would time out before Ollama could
+        // finish, regardless of model warmth. 120s gives headroom above the
+        // measured ~83s warm-call baseline without being unbounded.
         let worker_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(120))
             .build()
             .expect("failed to build worker HTTP client");
 

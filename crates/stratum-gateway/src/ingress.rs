@@ -78,7 +78,7 @@ impl AppState {
         // Ollama's own startup log) takes ~83s total for a 69-token warm
         // response (~1.1s/token, see skills.md). The original 30s was an
         // unmeasured default set before any real inference workload existed
-        // to calibrate against -- every gateway-mediated request against a
+        // to calibrate against, every gateway-mediated request against a
         // real worker on this hardware would time out before Ollama could
         // finish, regardless of model warmth. 120s gives headroom above the
         // measured ~83s warm-call baseline without being unbounded.
@@ -244,7 +244,7 @@ async fn handle_chat_completions(
     // Dispatch to the routed worker. Forwards the already-parsed request
     // as an Ollama-compatible /api/generate call. Worker unreachability
     // (connection refused, timeout, non-2xx) is a real, expected failure
-    // mode in dev -- no assumption here that a worker is actually running.
+    // mode in dev, no assumption here that a worker is actually running.
     let worker_url = format!("{}/api/generate", routing_decision.worker.address);
     let worker_payload = json!({
         "model": parsed.model,
@@ -306,7 +306,7 @@ async fn handle_chat_completions(
         }
         Err(e) => {
             // Expected in dev: no worker running at routing_decision.worker.address.
-            // Not a bug -- a real, honest failure mode being surfaced correctly
+            // Not a bug, a real, honest failure mode being surfaced correctly
             // rather than papered over with a fake success response.
             tracing::warn!(
                 stratum.replay_key = %inference_request.replay_key,
@@ -348,11 +348,11 @@ mod tests {
 
     /// Test state with a deliberately invalid worker address (port 0 is
     /// never a valid connection target). Used for tests that need dispatch
-    /// to fail FAST and DETERMINISTICALLY -- unlike a real connection-refused
+    /// to fail FAST and DETERMINISTICALLY, unlike a real connection-refused
     /// round trip to an unused local port, which still takes measurable
     /// wall-clock time and can introduce enough timing variance to affect
     /// rate-limiter tests that run many requests in a tight loop (the
-    /// bucket refills lazily based on elapsed time -- see rate_limit.rs).
+    /// bucket refills lazily based on elapsed time, see rate_limit.rs).
     fn test_state_with_unreachable_worker() -> AppState {
         let log_path = std::env::temp_dir().join(format!(
             "stratum-gateway-test-unreachable-{}.redb",
@@ -380,7 +380,7 @@ mod tests {
 
     #[tokio::test]
     async fn valid_request_without_running_worker_returns_502() {
-        // No real Ollama/vLLM worker is running in this test environment --
+        // No real Ollama/vLLM worker is running in this test environment,
         // this is a genuine, expected failure mode (worker unreachable),
         // not a gap in the gateway's logic. Confirms the gateway correctly
         // surfaces a real dispatch failure rather than papering over it
@@ -485,7 +485,7 @@ mod tests {
             batch_response.status(),
             StatusCode::BAD_GATEWAY,
             "BATCH bucket must be unaffected by REALTIME exhaustion \
-             (reaches dispatch, which fails fast -- port 0 is never valid -- \
+             (reaches dispatch, which fails fast, port 0 is never valid, \
              rather than being rejected by rate limiting)"
         );
     }
@@ -494,7 +494,7 @@ mod tests {
     async fn rate_limiting_rejects_before_attempting_dispatch() {
         // Isolates the rate-limiter's own behavior from dispatch outcome:
         // the 11th REALTIME request must be rejected with 429 specifically,
-        // not 502 -- proving rate limiting happens strictly before dispatch
+        // not 502, proving rate limiting happens strictly before dispatch
         // is attempted, regardless of whether a worker is reachable.
         let state = test_state_with_unreachable_worker();
         let body =
@@ -516,7 +516,7 @@ mod tests {
         assert_eq!(
             response.status(),
             StatusCode::TOO_MANY_REQUESTS,
-            "11th request must be 429 (rate limited), not 502 (dispatch failure) -- \
+            "11th request must be 429 (rate limited), not 502 (dispatch failure), \
              proving rate limiting happens before dispatch is attempted"
         );
     }

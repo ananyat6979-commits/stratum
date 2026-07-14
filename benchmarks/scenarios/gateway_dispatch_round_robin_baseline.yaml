@@ -45,22 +45,23 @@
 # the Phase 1 baseline's 50 RPS / 60s workload here would queue
 # thousands of in-flight failed dispatches simultaneously, which
 # would measure connection-pool/resource-exhaustion behavior instead
-# of the intended per-request dispatch-failure latency. 0.4 RPS / 30s
+# of the intended per-request dispatch-failure latency. 0.4 RPS / 120s
 # keeps concurrent in-flight requests low and the measurement clean.
-# See ARRIVAL RATE CALIBRATION below for why 0.4 RPS specifically.
+# See ARRIVAL RATE CALIBRATION below for why 0.4 RPS specifically, and
+# SAMPLE SIZE below for why 120s specifically.
 #
 # ARRIVAL RATE CALIBRATION
 # --------------------------
 # 0.4 RPS (2.5s inter-arrival) chosen empirically: manual testing showed
 # ~2.1-2.2s real dispatch-failure latency per request. This harness's
 # load loop is strictly sequential (single await per request, not
-# concurrent request spawning) -- at any arrival_rate_rps implying an
+# concurrent request spawning), at any arrival_rate_rps implying an
 # inter-arrival time shorter than the real per-request latency, the
 # loop falls permanently behind schedule, and observed_latency_ms
 # (measured from intended_issue_time, not actual_send_time) silently
 # accumulates that scheduling drift as if it were real latency. An
 # earlier attempt at 2 RPS (0.5s inter-arrival) against ~2.1s real
-# latency produced a nonsensical ~18s P50 -- accumulated drift, not
+# latency produced a nonsensical ~18s P50, accumulated drift, not
 # real dispatch latency. 0.4 RPS gives ~300-400ms of headroom per
 # request so the schedule can actually keep pace.
 #
@@ -76,16 +77,27 @@
 # EXPECTED STATUS CODES
 # ----------------------
 # No worker is running at the configured address, so every request
-# legitimately returns 502 (worker unreachable) -- this IS the
+# legitimately returns 502 (worker unreachable), this IS the
 # expected, correct outcome being measured (dispatch-failure latency),
 # not a failure to exclude from statistics. Without this override,
 # the harness's default is_success check (status < 500) would exclude
 # every single measurement and the benchmark would report zero data.
+#
+# SAMPLE SIZE
+# ------------
+# duration_seconds=120 (not the original 30) chosen to get a real
+# sample size for percentile estimation. At 0.4 RPS, 30s yields only
+# ~12 measurements in the window, too thin for P99/P999 confidence
+# intervals to mean much (bootstrap CI on 12 points is wide almost
+# by definition, not because of anything wrong with the measurement).
+# 120s yields ~48 measurements, still modest but a meaningful
+# improvement; extending further trades off against how long a
+# single benchmark run takes to execute manually.
 
 name: gateway_dispatch_round_robin_baseline
 target_url: "http://127.0.0.1:8080/v1/chat/completions"
 arrival_rate_rps: 0.4
-duration_seconds: 30
+duration_seconds: 120
 warmup_seconds: 5
 expected_status_codes: [502]
 

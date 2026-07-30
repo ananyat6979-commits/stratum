@@ -380,12 +380,21 @@ mod tests {
 
     #[tokio::test]
     async fn valid_request_without_running_worker_returns_502() {
-        // No real Ollama/vLLM worker is running in this test environment,
-        // this is a genuine, expected failure mode (worker unreachable),
-        // not a gap in the gateway's logic. Confirms the gateway correctly
-        // surfaces a real dispatch failure rather than papering over it
-        // with a fake success response.
-        let app = build_router(test_state());
+        // Uses test_state_with_unreachable_worker(), not test_state(),
+        // test_state() points at 127.0.0.1:11434, the real default Ollama
+        // port. If a real Ollama instance happens to be running on the
+        // test machine (as it now legitimately is, for manual verification
+        //  see the live dispatch success confirmed 2026-07-30), that
+        // request would genuinely succeed with a real 200, which is
+        // CORRECT behavior, not a test failure,  but it means this
+        // test's assertion of 502 was never actually testing "gateway
+        // handles unreachable worker correctly," it was silently coupled
+        // to whether Ollama happened to be running on the developer's
+        // machine at test time. A test's correctness must never depend
+        // on an external process's incidental state. Fixed to use the
+        // deliberately-invalid port 0 worker, same as every other
+        // dispatch-failure test in this file.
+        let app = build_router(test_state_with_unreachable_worker());
         let body =
             r#"{"model":"phi3:mini","messages":[{"role":"user","content":"hi"}],"max_tokens":50}"#;
 
@@ -396,7 +405,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_json_returns_400() {
-        let app = build_router(test_state());
+        let app = build_router(test_state_with_unreachable_worker());
         let response = app
             .oneshot(json_request("not valid json", None))
             .await

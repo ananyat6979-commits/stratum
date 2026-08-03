@@ -71,6 +71,28 @@ impl AppState {
         event_log_path: impl AsRef<std::path::Path>,
         workers: Vec<WorkerSpec>,
     ) -> Self {
+        Self::with_rate_limiter(node_id, event_log_path, workers, RateLimiter::with_defaults())
+    }
+
+    /// Same as [`AppState::new`], but with an explicit [`RateLimiter`]
+    /// instead of the production default.
+    ///
+    /// Exists so tests can substitute a bucket whose timing behavior is
+    /// controlled (e.g. a refill rate low enough that it cannot regenerate
+    /// a token during a multi-request warm-up loop, regardless of how much
+    /// wall-clock time that loop takes under CI/test-suite CPU contention).
+    /// See `ingress.rs`'s rate-limit exhaustion tests below for why this
+    /// seam was needed: `RateLimiter::with_defaults()`'s REALTIME bucket
+    /// (capacity 10, refill 10/sec) regenerates a token every 100ms, which
+    /// a 10-request loop can cross under parallel `cargo test` execution
+    /// even though each individual request is fast, turning an expected
+    /// 429 into a 502 nondeterministically.
+    pub fn with_rate_limiter(
+        node_id: impl Into<Arc<str>>,
+        event_log_path: impl AsRef<std::path::Path>,
+        workers: Vec<WorkerSpec>,
+        rate_limiter: RateLimiter,
+    ) -> Self {
         let event_log = AppendOnlyEventLog::open(event_log_path, "gateway-node-0")
             .expect("failed to open event log, check the path is writable");
         // 120s, not 30s. Measured on real hardware: phi3:mini on this dev
@@ -88,7 +110,7 @@ impl AppState {
             .expect("failed to build worker HTTP client");
 
         Self {
-            rate_limiter: Arc::new(RateLimiter::with_defaults()),
+            rate_limiter: Arc::new(rate_limiter),
             node_id: node_id.into(),
             router: Arc::new(RoundRobinRouter::new()),
             event_log: Arc::new(event_log),
@@ -346,6 +368,43 @@ mod tests {
         )
     }
 
+    /// Test state whose REALTIME bucket cannot refill during the test,
+    /// no matter how much wall-clock time the test's request loop takes
+    /// under CPU contention. Same capacity (10) as `with_defaults()`, so
+    /// the exhaustion count under test is unchanged, only the refill rate
+    /// differs, isolating "10 tokens consumed" from "how long that took."
+    ///
+    /// Use this instead of `test_state_with_unreachable_worker()` for any
+    /// test asserting exhaustion after an exact request count. See
+    /// `AppState::with_rate_limiter`'s doc comment for the failure mode
+    /// this replaces.
+    fn test_state_with_frozen_realtime_bucket() -> AppState {
+        let log_path = std::env::temp_dir().join(format!(
+            "stratum-gateway-test-frozen-{}.redb",
+            uuid::Uuid::new_v4()
+        ));
+        let rate_limiter = RateLimiter::new(
+            crate::rate_limit::BucketConfig {
+                capacity: 10.0,
+                refill_rate_per_sec: 0.0,
+            },
+            crate::rate_limit::BucketConfig {
+                capacity: 50.0,
+                refill_rate_per_sec: 50.0,
+            },
+            crate::rate_limit::BucketConfig {
+                capacity: 200.0,
+                refill_rate_per_sec: 100.0,
+            },
+        );
+        AppState::with_rate_limiter(
+            "test-node-0",
+            log_path,
+            vec![WorkerSpec::new("worker-0", "http://127.0.0.1:0")],
+            rate_limiter,
+        )
+    }
+
     /// Test state with a deliberately invalid worker address (port 0 is
     /// never a valid connection target). Used for tests that need dispatch
     /// to fail FAST and DETERMINISTICALLY, unlike a real connection-refused
@@ -431,7 +490,7 @@ mod tests {
     async fn realtime_class_rate_limit_exhausts_after_default_capacity() {
         // Default REALTIME bucket capacity is 10 (see rate_limit::RateLimiter::with_defaults).
         // The 11th immediate request must be rejected with 429.
-        let state = test_state_with_unreachable_worker();
+        let state = test_state_with_frozen_realtime_bucket();
         let body =
             r#"{"model":"phi3:mini","messages":[{"role":"user","content":"hi"}],"max_tokens":50}"#;
 
@@ -467,7 +526,7 @@ mod tests {
         // clones into each call) must NOT reset the underlying RateLimiter,
         // since it's Arc-wrapped. Exhaust REALTIME, confirm BATCH is unaffected
         // using the SAME AppState instance across both routers.
-        let state = test_state_with_unreachable_worker();
+        let state = test_state_with_frozen_realtime_bucket();
         let body =
             r#"{"model":"phi3:mini","messages":[{"role":"user","content":"hi"}],"max_tokens":50}"#;
 
@@ -505,7 +564,7 @@ mod tests {
         // the 11th REALTIME request must be rejected with 429 specifically,
         // not 502, proving rate limiting happens strictly before dispatch
         // is attempted, regardless of whether a worker is reachable.
-        let state = test_state_with_unreachable_worker();
+        let state = test_state_with_frozen_realtime_bucket();
         let body =
             r#"{"model":"phi3:mini","messages":[{"role":"user","content":"hi"}],"max_tokens":50}"#;
 

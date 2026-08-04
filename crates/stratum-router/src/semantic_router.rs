@@ -211,6 +211,16 @@ impl<P: WorkerSignalsProvider> SemanticRouter<P> {
 }
 
 impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
+    /// Delegates to the inherent `record_routing_outcome`. This is the
+    /// wiring ADR-009 and the inherent method's doc comment both flagged
+    /// as the missing piece: previously nothing on the trait object held
+    /// by `AppState` could reach this method without downcasting. See
+    /// `RouterStrategy::record_outcome`'s doc comment for why a trait
+    /// default method was chosen over that.
+    fn record_outcome(&self, worker_id: &str, prompt: &str) {
+        self.record_routing_outcome(worker_id, prompt);
+    }
+
     fn route(
         &self,
         replay_key: &str,
@@ -584,6 +594,8 @@ mod tests {
 
         // Record that "worker-1" recently handled a very similar prompt
         router.record_routing_outcome("worker-1", "What is the capital of France?");
+        // (the trait-object path is covered separately, see
+        // record_outcome_through_trait_object_reaches_cache_hit_index below)
 
         // A near-identical prompt should now favor worker-1 via cache_hit_prob,
         // even though the HTTP-sourced signals are identical (neutral) for both
@@ -595,6 +607,55 @@ mod tests {
             decision.worker.worker_id, "worker-1",
             "worker with matching cache-hit history should be preferred"
         );
+    }
+
+    #[test]
+    fn record_outcome_through_trait_object_reaches_cache_hit_index() {
+        // This is the specific thing ADR-009 flagged as missing: nothing
+        // holding only `&dyn RouterStrategy` (as stratum-gateway's
+        // AppState does) could previously reach record_routing_outcome
+        // without downcasting. Proves the default-method wiring on the
+        // trait fixes that, by calling record_outcome exclusively through
+        // a `&dyn RouterStrategy` reference -- never touching the
+        // concrete SemanticRouter type after construction -- and
+        // confirming it has the same effect as calling the inherent
+        // method directly (per cache_hit_prob_from_history_influences_selection
+        // above).
+        let registry = Arc::new(WorkerRegistry::new());
+        let bp = Arc::new(BackpressureController::with_defaults());
+        let router = SemanticRouter::new(
+            registry,
+            Arc::new(MockSignalsProvider::warmed(RoutingSignals::neutral())),
+            bp,
+        );
+        let workers = test_workers(2);
+
+        let strategy: &dyn RouterStrategy = &router;
+        strategy.record_outcome("worker-1", "What is the capital of France?");
+
+        let decision = strategy
+            .route("key", "What is the capital of France?", &workers)
+            .unwrap();
+
+        assert_eq!(
+            decision.worker.worker_id, "worker-1",
+            "record_outcome called through the trait object must reach the \
+             same cache-hit index record_routing_outcome writes to directly"
+        );
+    }
+
+    #[test]
+    fn round_robin_record_outcome_is_a_harmless_default_noop() {
+        // RouterStrategy::record_outcome's default implementation must
+        // exist and do nothing for strategies that don't override it --
+        // this is what makes it safe for stratum-gateway to call
+        // unconditionally on `Arc<dyn RouterStrategy>` regardless of
+        // which concrete strategy is active.
+        let router = crate::router::RoundRobinRouter::new();
+        let strategy: &dyn RouterStrategy = &router;
+        // Must not panic. Nothing to assert beyond that -- absence of
+        // a panic/side effect *is* the contract for the default case.
+        strategy.record_outcome("worker-0", "any prompt");
     }
 
     #[test]

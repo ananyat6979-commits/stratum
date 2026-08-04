@@ -116,6 +116,19 @@ pub trait RouterStrategy: Send + Sync + 'static {
 
     /// Human-readable name for this strategy, used in telemetry labels.
     fn strategy_name(&self) -> &'static str;
+
+    /// Record that a request was actually dispatched to `worker_id` after
+    /// a `route()` call selected it, so strategies with per-worker state
+    /// (e.g. SemanticRouter's cache-hit index) can update.
+    ///
+    /// Default no-op: most strategies (RoundRobinRouter) have no such
+    /// state. This exists on the trait, rather than requiring a caller to
+    /// downcast `dyn RouterStrategy` to a concrete type, specifically so
+    /// `AppState` can hold `Arc<dyn RouterStrategy>` and call this
+    /// uniformly regardless of which strategy is active -- see
+    /// `stratum-gateway`'s `handle_chat_completions`, which calls this
+    /// exactly once, after dispatch succeeds, never from inside route().
+    fn record_outcome(&self, _worker_id: &str, _prompt: &str) {}
 }
 
 /// Round-robin router: selects workers cyclically, no oracle signals.

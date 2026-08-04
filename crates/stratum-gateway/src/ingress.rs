@@ -30,7 +30,11 @@ use axum::Router;
 use serde_json::json;
 
 use stratum_replay::event_log::AppendOnlyEventLog;
+use stratum_router::backpressure::BackpressureController;
+use stratum_router::http_signals_provider::HttpSignalsProvider;
 use stratum_router::router::{route_and_log, RoundRobinRouter, RouterStrategy, WorkerSpec};
+use stratum_router::semantic_router::SemanticRouter;
+use stratum_router::worker_registry::WorkerRegistry;
 
 use crate::proto::{to_inference_request, OpenAiCompatRequest};
 use crate::rate_limit::RateLimiter;
@@ -43,21 +47,33 @@ use crate::sla::assign_sla_class;
 pub struct AppState {
     pub rate_limiter: Arc<RateLimiter>,
     pub node_id: Arc<str>,
-    /// The active routing strategy. RoundRobinRouter for now, gateway
-    /// doesn't manage a running cache-oracle instance, so SemanticRouter
-    /// (which needs live oracle signals to be meaningful) is not yet the
-    /// default here. Swapping this to SemanticRouter is a future step
-    /// once the gateway has a real worker registry and oracle connection.
+    /// The active routing strategy. `RoundRobinRouter` by default (see
+    /// `AppState::new`), `SemanticRouter` when constructed via
+    /// `AppState::with_semantic_router`. Held as a trait object so
+    /// `handle_chat_completions` doesn't need to know which strategy is
+    /// active -- including for `record_outcome`, see
+    /// `RouterStrategy::record_outcome`'s doc comment in stratum-router.
     pub router: Arc<dyn RouterStrategy>,
     /// The event log this gateway writes routing decisions to. Shared
     /// across requests, wrapped in Arc since AppState is cloned per-request
     /// by Axum's Router::with_state.
     pub event_log: Arc<AppendOnlyEventLog>,
-    /// Static worker list for now, no real worker registry/health
-    /// checking wired into the gateway yet. This is a known, deliberate
-    /// simplification: routing logic is being proven correct end-to-end
-    /// before worker discovery/health machinery is added on top of it.
+    /// Static worker list, used directly when `worker_registry` is `None`.
+    /// When a registry is present (`with_semantic_router`), the registry's
+    /// `routable_workers()` is used instead on every request, so this
+    /// field's contents become stale on purpose -- it's only the initial
+    /// seed the registry was populated from at construction time. Kept
+    /// (rather than removed) so `AppState::new`'s existing static-list
+    /// behavior, and every existing test built on it, is unchanged.
     pub workers: Vec<WorkerSpec>,
+    /// Health-aware worker registry. `None` for `AppState::new`/
+    /// `with_rate_limiter` (the RoundRobinRouter-over-a-static-list path
+    /// that predates this field and every existing gateway test depends
+    /// on). `Some` for `AppState::with_semantic_router`, which is also
+    /// the only constructor that populates it and the only one where
+    /// `record_success`/`record_failure` are called from the dispatch
+    /// path -- see `handle_chat_completions`.
+    pub worker_registry: Option<Arc<WorkerRegistry>>,
     /// HTTP client used to dispatch requests to the routed worker.
     /// Constructed once and cloned (reqwest::Client is internally
     /// Arc-wrapped, so cloning is cheap) rather than built per-request,
@@ -93,6 +109,101 @@ impl AppState {
         workers: Vec<WorkerSpec>,
         rate_limiter: RateLimiter,
     ) -> Self {
+        let (event_log, worker_client) = Self::open_log_and_client(event_log_path);
+
+        Self {
+            rate_limiter: Arc::new(rate_limiter),
+            node_id: node_id.into(),
+            router: Arc::new(RoundRobinRouter::new()),
+            event_log: Arc::new(event_log),
+            workers,
+            worker_registry: None,
+            worker_client,
+        }
+    }
+
+    /// Constructs an `AppState` with `SemanticRouter` as the active
+    /// routing strategy, backed by a live `WorkerRegistry` and an
+    /// `HttpSignalsProvider` polling a running cache-oracle instance.
+    ///
+    /// This is the integration step `docs/SCOPE.md` names as the
+    /// project's immediate next step: every piece here (`SemanticRouter`,
+    /// `HttpSignalsProvider`, `WorkerRegistry`) already exists and is
+    /// tested in isolation in `stratum-router`; this constructor is what
+    /// wires them into the gateway's actual request path for the first
+    /// time.
+    ///
+    /// # Arguments
+    /// * `initial_workers` - workers registered into the `WorkerRegistry`
+    ///   at startup. Unlike `AppState::new`'s static list, this registry
+    ///   is mutable afterward (health state changes as requests succeed
+    ///   or fail) even though the constructor's input is still a fixed
+    ///   list -- there's no dynamic worker discovery yet, only dynamic
+    ///   health tracking of a fixed worker set. Full discovery is a
+    ///   separate, later piece of work, not blocked on this one.
+    /// * `cache_oracle_base_url` - e.g. `"http://127.0.0.1:8001"`. Must
+    ///   point at a reachable cache-oracle for oracle signals to be
+    ///   anything other than the neutral/unwarmed default -- see
+    ///   `HttpSignalsProvider::new`'s doc comment for staleness handling
+    ///   if the oracle is unreachable or goes down after startup.
+    ///
+    /// # Panics
+    /// Must be called from within a Tokio runtime (constructs an
+    /// `HttpSignalsProvider`, which spawns a background polling task).
+    /// Calling this before `#[tokio::main]`'s runtime is active will
+    /// panic. Every existing call site (`main.rs`) already satisfies
+    /// this; it's noted here because it's the one behavioral difference
+    /// from `AppState::new`, which has no such requirement.
+    pub fn with_semantic_router(
+        node_id: impl Into<Arc<str>>,
+        event_log_path: impl AsRef<std::path::Path>,
+        initial_workers: Vec<WorkerSpec>,
+        cache_oracle_base_url: impl Into<String>,
+    ) -> Self {
+        let (event_log, worker_client) = Self::open_log_and_client(&event_log_path);
+
+        let registry = Arc::new(WorkerRegistry::new());
+        for worker in &initial_workers {
+            registry.register(worker.clone());
+        }
+
+        // Poll every 2s, treat signals older than 10s as stale (falls back
+        // to neutral/unwarmed rather than serving data that may no longer
+        // be accurate). Matches the values already manually verified live
+        // against a running cache-oracle in stratum-router's manual
+        // verification binary (crates/stratum-router/src/main.rs).
+        let signals_provider = Arc::new(HttpSignalsProvider::new(
+            cache_oracle_base_url,
+            Duration::from_secs(2),
+            Duration::from_secs(10),
+        ));
+
+        let backpressure = Arc::new(BackpressureController::with_defaults());
+
+        let router = Arc::new(SemanticRouter::new(
+            Arc::clone(&registry),
+            signals_provider,
+            backpressure,
+        ));
+
+        Self {
+            rate_limiter: Arc::new(RateLimiter::with_defaults()),
+            node_id: node_id.into(),
+            router,
+            event_log: Arc::new(event_log),
+            workers: initial_workers,
+            worker_registry: Some(registry),
+            worker_client,
+        }
+    }
+
+    /// Shared construction logic for the event log and worker HTTP
+    /// client, factored out so `with_semantic_router` doesn't duplicate
+    /// the 120s-timeout rationale (see below) or the event-log-open
+    /// error handling.
+    fn open_log_and_client(
+        event_log_path: impl AsRef<std::path::Path>,
+    ) -> (AppendOnlyEventLog, reqwest::Client) {
         let event_log = AppendOnlyEventLog::open(event_log_path, "gateway-node-0")
             .expect("failed to open event log, check the path is writable");
         // 120s, not 30s. Measured on real hardware: phi3:mini on this dev
@@ -108,15 +219,7 @@ impl AppState {
             .timeout(Duration::from_secs(120))
             .build()
             .expect("failed to build worker HTTP client");
-
-        Self {
-            rate_limiter: Arc::new(rate_limiter),
-            node_id: node_id.into(),
-            router: Arc::new(RoundRobinRouter::new()),
-            event_log: Arc::new(event_log),
-            workers,
-            worker_client,
-        }
+        (event_log, worker_client)
     }
 }
 
@@ -223,6 +326,16 @@ async fn handle_chat_completions(
     // (the current default) ignores it entirely.
     let prompt_text = &inference_request.prompt;
 
+    // Effective worker list for this request: the health-filtered registry
+    // view when one is present (AppState::with_semantic_router), otherwise
+    // the static list every other constructor uses unchanged. This is the
+    // one place routing decisions and dispatch see different worker sets
+    // depending on which AppState constructor built this instance.
+    let effective_workers: Vec<WorkerSpec> = match &state.worker_registry {
+        Some(registry) => registry.routable_workers(),
+        None => state.workers.clone(),
+    };
+
     // Route the request. ingress_event_id=0 for now, this gateway
     // does not yet write a RequestIngressEvent to the log before routing
     // (that's the full causal.proto RFC-001 wiring, not yet built here).
@@ -234,7 +347,7 @@ async fn handle_chat_completions(
         &inference_request.replay_key,
         prompt_text,
         0u128,
-        &state.workers,
+        &effective_workers,
         &state.event_log,
     ) {
         Ok(result) => result,
@@ -249,19 +362,6 @@ async fn handle_chat_completions(
                 .into_response();
         }
     };
-
-    // No real worker dispatch yet, stratum-gateway does not forward
-    // HTTP requests to Ollama/vLLM workers as of this commit. This is
-    // the next integration slice after this one.
-    //
-    // record_routing_outcome() is NOT called here yet. Per ADR-009, it
-    // must be called on SemanticRouter specifically after a request is
-    // dispatched, but RoundRobinRouter (this gateway's current default
-    // strategy) has no cache-hit index to populate, and downcasting
-    // from `dyn RouterStrategy` to check for SemanticRouter at runtime
-    // would be solving a problem this commit doesn't have yet. Wire
-    // this call in when SemanticRouter becomes the gateway's active
-    // strategy, not before. Tracked as a known gap in ADR-009.
 
     // Dispatch to the routed worker. Forwards the already-parsed request
     // as an Ollama-compatible /api/generate call. Worker unreachability
@@ -288,6 +388,25 @@ async fn handle_chat_completions(
                 .await
                 .unwrap_or_else(|_| json!({"error": "worker returned non-JSON response"}));
 
+            // Two outcome-recording calls, both only meaningful on the
+            // success path and both no-ops (or absent) on the paths that
+            // predate this integration:
+            //
+            // - router.record_outcome(): populates SemanticRouter's
+            //   cache-hit index for this (worker, prompt) pair. A no-op
+            //   for RoundRobinRouter via the trait's default method --
+            //   see RouterStrategy::record_outcome's doc comment.
+            // - worker_registry.record_success(): resets the worker's
+            //   consecutive-failure counter, restoring Degraded -> Healthy
+            //   if applicable. Only present when worker_registry is Some,
+            //   i.e. only for AppState::with_semantic_router.
+            state
+                .router
+                .record_outcome(&routing_decision.worker.worker_id, prompt_text);
+            if let Some(registry) = &state.worker_registry {
+                registry.record_success(&routing_decision.worker.worker_id);
+            }
+
             tracing::info!(
                 stratum.replay_key = %inference_request.replay_key,
                 stratum.routed_to_worker = %routing_decision.worker.worker_id,
@@ -310,6 +429,9 @@ async fn handle_chat_completions(
         }
         Ok(worker_response) => {
             let status = worker_response.status();
+            if let Some(registry) = &state.worker_registry {
+                registry.record_failure(&routing_decision.worker.worker_id);
+            }
             tracing::warn!(
                 stratum.replay_key = %inference_request.replay_key,
                 stratum.routed_to_worker = %routing_decision.worker.worker_id,
@@ -330,6 +452,9 @@ async fn handle_chat_completions(
             // Expected in dev: no worker running at routing_decision.worker.address.
             // Not a bug, a real, honest failure mode being surfaced correctly
             // rather than papered over with a fake success response.
+            if let Some(registry) = &state.worker_registry {
+                registry.record_failure(&routing_decision.worker.worker_id);
+            }
             tracing::warn!(
                 stratum.replay_key = %inference_request.replay_key,
                 stratum.routed_to_worker = %routing_decision.worker.worker_id,
@@ -421,6 +546,28 @@ mod tests {
             "test-node-0",
             log_path,
             vec![WorkerSpec::new("worker-0", "http://127.0.0.1:0")],
+        )
+    }
+
+    /// Test state built via `AppState::with_semantic_router`: SemanticRouter
+    /// as the active strategy, a real `WorkerRegistry` seeded with one
+    /// deliberately-unreachable worker (port 0, same rationale as
+    /// `test_state_with_unreachable_worker`), and an `HttpSignalsProvider`
+    /// pointed at a cache-oracle base URL that is never actually queried
+    /// by these tests (port 0 as well) -- staleness handling means an
+    /// unreachable oracle degrades to neutral/unwarmed signals rather than
+    /// erroring, so this is a valid, deterministic test configuration, not
+    /// a shortcut. See `HttpSignalsProvider::new`'s doc comment.
+    fn test_state_with_semantic_router() -> AppState {
+        let log_path = std::env::temp_dir().join(format!(
+            "stratum-gateway-test-semantic-{}.redb",
+            uuid::Uuid::new_v4()
+        ));
+        AppState::with_semantic_router(
+            "test-node-0",
+            log_path,
+            vec![WorkerSpec::new("worker-0", "http://127.0.0.1:0")],
+            "http://127.0.0.1:0",
         )
     }
 
@@ -587,5 +734,127 @@ mod tests {
             "11th request must be 429 (rate limited), not 502 (dispatch failure), \
              proving rate limiting happens before dispatch is attempted"
         );
+    }
+
+    // ---- SemanticRouter / WorkerRegistry integration ----
+    //
+    // These tests exercise AppState::with_semantic_router specifically,
+    // through the real HTTP pipeline (build_router + oneshot), not just
+    // stratum-router's own unit tests. That distinction matters: the
+    // trait-object wiring (record_outcome_through_trait_object_reaches_
+    // cache_hit_index in stratum-router/src/semantic_router.rs) proves
+    // the mechanism works in isolation; these prove the gateway actually
+    // calls it, on the real request path, with a real WorkerRegistry
+    // whose state changes are then visible to routing on the *next*
+    // request -- the actual end-to-end claim docs/SCOPE.md's "immediate
+    // next step" was about.
+
+    #[tokio::test]
+    async fn semantic_router_state_starts_with_one_healthy_worker() {
+        let state = test_state_with_semantic_router();
+        let registry = state
+            .worker_registry
+            .as_ref()
+            .expect("with_semantic_router must populate worker_registry");
+        assert_eq!(registry.len(), 1);
+        assert_eq!(
+            registry.health("worker-0"),
+            Some(stratum_router::worker_registry::WorkerHealth::Healthy)
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_router_dispatch_failures_degrade_then_exclude_worker() {
+        // Full cycle through the real HTTP path: dispatch failures against
+        // the deliberately-unreachable worker (port 0) accumulate in the
+        // registry via handle_chat_completions' new record_failure calls,
+        // and once the worker crosses the Unavailable threshold (10
+        // consecutive failures, see WorkerRegistry::record_failure),
+        // routable_workers() excludes it -- so routing itself fails
+        // closed (503, "no workers available") rather than continuing to
+        // dispatch-and-fail (502) against a worker already known to be down.
+        let state = test_state_with_semantic_router();
+        let body =
+            r#"{"model":"phi3:mini","messages":[{"role":"user","content":"hi"}],"max_tokens":50}"#;
+
+        // Requests 1-2: still Healthy (threshold is 3 consecutive failures).
+        for i in 0..2 {
+            let app = build_router(state.clone());
+            let response = app.oneshot(json_request(body, None)).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_GATEWAY,
+                "request {i}: worker still routable while Healthy, dispatch fails (port 0)"
+            );
+        }
+
+        let registry = state.worker_registry.as_ref().unwrap();
+        assert_eq!(
+            registry.health("worker-0"),
+            Some(stratum_router::worker_registry::WorkerHealth::Healthy),
+            "2 consecutive failures must not yet degrade the worker"
+        );
+
+        // Requests 3-9: crosses into Degraded (>=3 failures), still routable.
+        for i in 2..9 {
+            let app = build_router(state.clone());
+            let response = app.oneshot(json_request(body, None)).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_GATEWAY,
+                "request {i}: worker Degraded but still routable (weight_multiplier > 0)"
+            );
+        }
+        assert_eq!(
+            registry.health("worker-0"),
+            Some(stratum_router::worker_registry::WorkerHealth::Degraded),
+            "3-9 consecutive failures must degrade, not yet exclude, the worker"
+        );
+
+        // Request 10: the 10th consecutive failure crosses the Unavailable
+        // threshold. This request itself still dispatches (worker was
+        // routable when routing ran) and fails with 502; the state change
+        // to Unavailable only takes effect for requests *after* this one.
+        let app = build_router(state.clone());
+        let tenth = app.oneshot(json_request(body, None)).await.unwrap();
+        assert_eq!(tenth.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            registry.health("worker-0"),
+            Some(stratum_router::worker_registry::WorkerHealth::Unavailable),
+            "10th consecutive failure must make the worker Unavailable"
+        );
+
+        // Request 11: routing now sees zero routable workers (the only
+        // registered worker is Unavailable) and fails closed with 503,
+        // never reaching dispatch at all.
+        let app = build_router(state.clone());
+        let eleventh = app.oneshot(json_request(body, None)).await.unwrap();
+        assert_eq!(
+            eleventh.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "with the only worker Unavailable, routing must fail closed (503) \
+             rather than attempt dispatch against a worker already known to be down"
+        );
+    }
+
+    #[tokio::test]
+    async fn round_robin_path_never_touches_worker_registry() {
+        // Regression guard for the additive design: AppState::new (the
+        // RoundRobinRouter path every pre-existing test in this file
+        // depends on) must have worker_registry == None, and dispatch
+        // failures against it must not panic or behave differently now
+        // that the registry-recording calls exist in the dispatch match
+        // arms -- they're guarded by `if let Some(registry)`, this proves
+        // that guard actually works when the value is None, not just that
+        // it compiles.
+        let state = test_state_with_unreachable_worker();
+        assert!(state.worker_registry.is_none());
+
+        let app = build_router(state.clone());
+        let body =
+            r#"{"model":"phi3:mini","messages":[{"role":"user","content":"hi"}],"max_tokens":50}"#;
+        let response = app.oneshot(json_request(body, None)).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
 }

@@ -1,4 +1,4 @@
-# SCOPE.md — What's Real vs. Deferred
+# SCOPE.md: What's Real vs. Deferred
 
 **Status**: Living document. Source of truth for what this repository
 actually contains, superseding any aspirational language in earlier
@@ -20,10 +20,10 @@ removal list and reasoning.
 
 | Component | What it actually does | Evidence |
 |---|---|---|
-| `stratum-gateway` | Full HTTP/2 ingress: request signing, SLA classification, rate limiting, transcoding, real dispatch to a worker over HTTP | 34 tests, 2 doctests, manually verified live against a running Ollama instance (real 200 responses, real model output round-tripped) |
-| `stratum-router` | `RoundRobinRouter` (active, wired into the gateway) and `SemanticRouter` (built, tested, **not yet wired into the gateway** — see Deferred below) | 82 tests |
-| `stratum-replay` — event log | Append-only, redb-backed event log with Lamport logical clock | 18 tests |
-| `stratum-replay` — "replay" test | Proves a **stateless router re-derives the same routing decision** when re-invoked with the same recorded inputs (`replay_key`, prompt, worker set) | `tests/replay_determinism.rs` |
+| `stratum-gateway` | Full HTTP/2 ingress: request signing, SLA classification, rate limiting, transcoding, real dispatch to a worker over HTTP. `SemanticRouter` is the default routing strategy, backed by a live `WorkerRegistry` with health tracking wired into the real dispatch path. `AppState::new` (RoundRobinRouter, no registry) still exists unchanged for callers that don't need it. | 37 tests (34 + 3 new, including a full request-by-request trace of Healthy -> Degraded -> Unavailable -> routing-fails-closed through the real HTTP path), 2 doctests, manually verified live against a running Ollama instance (real 200 responses, real model output round-tripped). Full local `cargo test` run confirmed 37/37 passing. |
+| `stratum-router` | `RoundRobinRouter` and `SemanticRouter`, both wired into the gateway | 84 tests (82 + 2 new proving `RouterStrategy::record_outcome`'s trait-object wiring specifically) |
+| `stratum-replay`- event log | Append-only, redb-backed event log with Lamport logical clock | 18 tests |
+| `stratum-replay`- "replay" test | Proves a **stateless router re-derives the same routing decision** when re-invoked with the same recorded inputs (`replay_key`, prompt, worker set) | `tests/replay_determinism.rs` |
 | `cache-oracle` | Real FastAPI service: KV-pressure prediction (Holt-Winters), FAISS-backed cache-hit indexing, worker registration API | 41 tests, verified by live execution, `faiss-cpu` confirmed building cleanly |
 
 ## A precise correction: what "replay" means here
@@ -37,8 +37,8 @@ contained it (`replayer.rs`, `mock_model.rs`, `dependency_graph.rs`)
 were empty and have been removed.
 
 What exists instead, and is real: an event log that durably records
-routing decisions, and a test proving that `RoundRobinRouter` — which
-is a pure function of its inputs — produces the same output when
+routing decisions, and a test proving that `RoundRobinRouter`, which
+is a pure function of its inputs, produces the same output when
 re-invoked with the same inputs read back from that log. This is a
 smaller, easier claim than historical-state reconstruction, and it's
 worth being exact about the difference, because the harder version is
@@ -52,15 +52,30 @@ ever built, it belongs in these same three files, for real.
 | `stratum-raft` | Empty crate (`Cargo.toml` + doc-comment-only `lib.rs`) | Not started. Config-plane consensus is real, useful work, but lower priority than finishing what's already 80% wired (see Next below). |
 | `stratum-scheduler` | Empty crate | **Structurally blocked**, not just "not yet started": the design (NUMA-aware, predicted-length scheduling) requires backend-internal scheduling hooks (a forkable scheduler, block-table access) that this project's actual inference backend, Ollama, does not expose. This phase needs either a backend change (e.g. a real vLLM deployment) or a redesign around what Ollama can actually offer, before implementation makes sense. |
 | `stratum-chaos` | Empty crate | Not started. A reduced taxonomy (process-kill, partition simulation) is achievable against Ollama; the original design's backend-internal fault modes (KV eviction storm, attention OOM) are not, for the same reason as the scheduler. |
-| `causal-observer` (Go) | `cmd/observer/main.go` only — proves the Go toolchain builds, nothing else | Not started. |
+| `causal-observer` (Go) | `cmd/observer/main.go` only, proves the Go toolchain builds, nothing else | Not started. |
 | `experiment-engine`, `eval-fabric`, `reliability-model`, `synthgen` (Python) | `pyproject.toml` only, zero implementation files | Not started. No `msprt.py`, `estimator.py`, `cusum.py`, or `survival.py` exist. Any prior document citing these paths at a specific proficiency level was describing planned work, not completed work. |
 | Custom Raft, mSPRT sequential testing, doubly-robust causal estimation, synthetic data generation, NUMA-aware scheduling | Not started | Real, well-specified ideas in the original design blueprint. None require the backend-choice resolution above except scheduling/chaos, so these are legitimate next-phase candidates once the wiring below is finished. |
 
-## Immediate next step (already scoped, not yet done)
+## Immediate next step
 
-Wire `SemanticRouter` into `stratum-gateway` as the active strategy:
-add a live `Arc<WorkerRegistry>` and `HttpSignalsProvider` connected to
-a running `cache-oracle` process to `AppState`, and call
-`record_routing_outcome()` from the dispatch-success path. Every piece
-this depends on already exists and is tested in isolation — this is
-integration work, not new subsystem design.
+`SemanticRouter` wiring is done and confirmed by a full local
+`cargo test` run (37/37 gateway, 84/84 router, both green). See
+commits `c3637a7` and `90c5fc5` for the exact changes.
+
+The natural next artifact is a **benchmark comparing SemanticRouter
+against RoundRobinRouter, run interleaved** (both strategies' requests
+close together in time within the same run) rather than as two
+separate runs — this is far more robust to this machine's documented
+wide CPU-only inference latency variance (2.8s-337s for an identical
+prompt, see the earlier benchmark retrospective) than an absolute
+number would be, because both strategies experience roughly the same
+noise floor and the *difference* between them remains a meaningful
+signal even when the absolute numbers are noisy. This produces the
+project's first real, defensible "X beats Y" claim with a method,
+rather than an architecture description with no measurement behind it.
+
+Parallel-track candidates that don't block on the above and don't
+require resolving the Ollama/vLLM backend question: `stratum-raft`
+(self-contained, no backend dependency) and `experiment-engine`'s
+mSPRT sequential testing (validated via Monte Carlo simulation against
+synthetic data, not live traffic — also backend-independent).

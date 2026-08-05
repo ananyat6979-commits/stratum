@@ -31,14 +31,27 @@
 //!
 //! `STRATUM_GATEWAY_PORT` (default `8080`), `STRATUM_EVENT_LOG_PATH`
 //! (default `gateway_event_log.redb`), `STRATUM_WORKER_0_URL` (default
-//! `http://127.0.0.1:11434`): exist for the same reason as
-//! STRATUM_ROUTING_STRATEGY. Running two instances of this binary side
-//! by side (one per strategy) needs each instance on its own port, its
-//! own event log file, and two processes opening the same redb path
-//! concurrently fails; this project hit that exact DatabaseAlreadyOpen
-//! error once already, in stratum-gateway's own test suite, before
-//! tests were given per-call unique paths, and independently
-//! pointable at a worker.
+//! `http://127.0.0.1:11434`): exist so the same binary can run as two
+//! independent instances side by side (one per strategy) without
+//! colliding on port or event log file, two processes opening the
+//! same redb path concurrently fails; this project hit that exact
+//! DatabaseAlreadyOpen error once already, in stratum-gateway's own
+//! test suite, before tests were given per-call unique paths.
+//!
+//! `STRATUM_WORKER_1_URL` (optional, no default, worker-0-only if
+//! unset): registers a second worker alongside worker-0. Exists
+//! specifically for benchmarking SemanticRouter's health tracking
+//! (WorkerRegistry) against a realistic topology. A single-worker
+//! deployment means that worker going Unavailable after repeated
+//! dispatch failures empties the routable worker set entirely,
+//! collapsing every subsequent request to a 503 ("no workers
+//! available for routing") rather than the routing-overhead
+//! measurement the benchmark is meant to isolate, this is exactly
+//! what happened when semantic_vs_round_robin.yaml was first run
+//! against a single deliberately-unreachable worker. With two workers,
+//! one going Unavailable still leaves the other routable, so dispatch
+//! is genuinely attempted on (nearly) every request, the way it would
+//! be in any real multi-worker deployment.
 
 use stratum_gateway::ingress::{build_router, AppState};
 use stratum_gateway::telemetry::init_telemetry;
@@ -59,7 +72,11 @@ async fn main() {
     let cache_oracle_url = env_or("STRATUM_CACHE_ORACLE_URL", "http://127.0.0.1:8001");
     let bind_addr = format!("127.0.0.1:{port}");
 
-    let workers = vec![WorkerSpec::new("worker-0", worker_0_url)];
+    let mut workers = vec![WorkerSpec::new("worker-0", worker_0_url)];
+    if let Ok(worker_1_url) = std::env::var("STRATUM_WORKER_1_URL") {
+        println!("stratum-gateway: registering second worker at {worker_1_url}");
+        workers.push(WorkerSpec::new("worker-1", worker_1_url));
+    }
 
     let state = match strategy.as_str() {
         "round_robin" => {
@@ -93,7 +110,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(bind_addr.as_str())
         .await
         .unwrap_or_else(|e| {
-            panic!("failed to bind to {bind_addr}, is the port already in use? ({e})")
+            panic!("failed to bind to {bind_addr}: is the port already in use? ({e})")
         });
     println!("stratum-gateway listening on http://{bind_addr}");
     println!("try: curl -X POST http://{bind_addr}/v1/chat/completions \\");

@@ -270,9 +270,22 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
             .strip_prefix("session:")
             .and_then(|s| s.split(':').next());
 
-        // Fetch oracle signals for all routable workers
+        // Fetch oracle signals for all routable workers.
+        //
+        // Timed explicitly around this call for the semantic_vs_round_robin
+        // benchmark's bimodal latency investigation -- this isolates
+        // signals_provider's cost specifically from everything else route()
+        // does, since it's the one call in this function with no equivalent
+        // in RoundRobinRouter::route(). Safe to remove once that
+        // investigation concludes.
         let worker_ids: Vec<&str> = routable.iter().map(|w| w.worker_id.as_str()).collect();
+        let signals_fetch_start = std::time::Instant::now();
         let oracle_signals = self.signals_provider.signals_for_workers(&worker_ids);
+        let signals_fetch_us = signals_fetch_start.elapsed().as_micros() as u64;
+        tracing::debug!(
+            stratum.signals_fetch_us = signals_fetch_us,
+            "oracle signals fetched"
+        );
 
         // Try affinity routing first
         if let Some(session) = session_id {

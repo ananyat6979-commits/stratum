@@ -167,7 +167,22 @@ impl HttpSignalsProvider {
 impl WorkerSignalsProvider for HttpSignalsProvider {
     fn signals_for_workers(&self, worker_ids: &[&str]) -> Vec<WorkerOracleSignals> {
         let guard = self.cache.read().unwrap();
-        let is_stale = guard.last_refreshed.elapsed() > self.max_staleness;
+        let elapsed = guard.last_refreshed.elapsed();
+        let is_stale = elapsed > self.max_staleness;
+
+        // Diagnostic for the semantic_vs_round_robin benchmark's bimodal
+        // latency finding: logs which branch every call takes and how
+        // stale the cache actually is at that moment, so a run's latency
+        // clusters can be correlated against real branch data instead of
+        // inferred from timing alone. See docs/SCOPE.md's benchmark
+        // section for the investigation this supports. Safe to remove
+        // once that investigation concludes -- this is diagnostic, not
+        // permanent instrumentation.
+        tracing::debug!(
+            stratum.signals_cache_stale = is_stale,
+            stratum.signals_cache_age_ms = elapsed.as_millis() as u64,
+            "signals_for_workers cache read"
+        );
 
         worker_ids
             .iter()

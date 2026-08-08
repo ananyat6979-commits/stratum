@@ -1,0 +1,93 @@
+{
+  "scenario": "semantic_vs_round_robin",
+  "run_id": "3e36d73b",
+  "git_sha": "eb1e0e3",
+  "timestamp": "2026-08-06T05:17:56.361879+00:00",
+  "interleaved": true,
+  "arms": [
+    {
+      "label": "round_robin",
+      "target_url": "http://127.0.0.1:8080/v1/chat/completions",
+      "n_requests_sent": 49,
+      "n_success": 49,
+      "error_rate": 0.0,
+      "actual_rps": 0.3914613491835234,
+      "n_co_corrected_measurements": 49,
+      "percentiles_ms": {
+        "p50": {
+          "estimate": 172.00000000002547,
+          "ci_lower": 140.00000000010004,
+          "ci_upper": 2172.0000000000255
+        },
+        "p75": {
+          "estimate": 2172.0000000000255,
+          "ci_lower": 2156.0000000000628,
+          "ci_upper": 2187.000000000012
+        },
+        "p95": {
+          "estimate": 2196.6000000000577,
+          "ci_lower": 2187.000000000012,
+          "ci_upper": 2212.600000000066
+        },
+        "p99": {
+          "estimate": 2211.320000000069,
+          "ci_lower": 2187.000000000012,
+          "ci_upper": 2219.000000000051
+        },
+        "p999": {
+          "estimate": 2218.2320000000527,
+          "ci_lower": 2187.000000000012,
+          "ci_upper": 2219.000000000051
+        },
+        "mean": {
+          "estimate": 1132.061224489847,
+          "ci_lower": 845.2862244898453,
+          "ci_upper": 1426.4035714286213
+        }
+      },
+      "parquet_path": "..\\..\\benchmarks\\results\\semantic_vs_round_robin_round_robin_2026-08-06_3e36d73b.parquet"
+    },
+    {
+      "label": "semantic",
+      "target_url": "http://127.0.0.1:8081/v1/chat/completions",
+      "n_requests_sent": 49,
+      "n_success": 1,
+      "error_rate": 0.9795918367346939,
+      "actual_rps": 0.39200000000000035,
+      "n_co_corrected_measurements": 1,
+      "percentiles_ms": {
+        "p50": {
+          "estimate": 2187.999999999988,
+          "ci_lower": 2187.999999999988,
+          "ci_upper": 2187.999999999988
+        },
+        "p75": {
+          "estimate": 2187.999999999988,
+          "ci_lower": 2187.999999999988,
+          "ci_upper": 2187.999999999988
+        },
+        "p95": {
+          "estimate": 2187.999999999988,
+          "ci_lower": 2187.999999999988,
+          "ci_upper": 2187.999999999988
+        },
+        "p99": {
+          "estimate": 2187.999999999988,
+          "ci_lower": 2187.999999999988,
+          "ci_upper": 2187.999999999988
+        },
+        "p999": {
+          "estimate": 2187.999999999988,
+          "ci_lower": 2187.999999999988,
+          "ci_upper": 2187.999999999988
+        },
+        "mean": {
+          "estimate": 2187.999999999988,
+          "ci_lower": 2187.999999999988,
+          "ci_upper": 2187.999999999988
+        }
+      },
+      "parquet_path": "..\\..\\benchmarks\\results\\semantic_vs_round_robin_semantic_2026-08-06_3e36d73b.parquet"
+    }
+  ]
+}

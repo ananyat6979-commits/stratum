@@ -1,0 +1,73 @@
+# STRATUM Benchmark Scenario: SemanticRouter vs RoundRobinRouter (routing overhead)
+#
+# PURPOSE
+# -------
+# First real comparative result in this project: measures the
+# ROUTING OVERHEAD difference between SemanticRouter and
+# RoundRobinRouter, the gateway-internal cost of SemanticRouter's
+# embedding computation, cache-hit-index lookup, and scoring, versus
+# RoundRobinRouter's near-zero atomic-increment selection.
+#
+# SCOPE: WHAT THIS DOES NOT MEASURE
+# ------------------------------------
+# This is NOT a measurement of routing QUALITY (does SemanticRouter
+# actually send repeated prompts to warm workers more effectively than
+# round-robin, resulting in better real inference latency). That is a
+# separate, larger benchmark requiring real Ollama inference, which on
+# this hardware has documented severe variance (2.8s-337s for an
+# identical prompt, see skills.md / benchmarks/README.md) and needs a
+# deliberately larger sample size to say anything meaningful. See
+# docs/SCOPE.md's "Immediate next step" section for that distinction.
+#
+# Both variants below point at an unreachable worker
+# (http://127.0.0.1:0), same technique used throughout this project's
+# test suite and in gateway_dispatch_round_robin_baseline.yaml, so
+# every request legitimately returns 200 after a real, bounded
+# dispatch attempt, isolating routing overhead from inference time
+# entirely.
+#
+# WHY INTERLEAVED (see compare_interleaved.py's module docstring for
+# the full mechanism): both arms run CONCURRENTLY via asyncio.gather
+# against two already-running gateway instances, one per
+# STRATUM_ROUTING_STRATEGY value. This matters specifically because
+# of this machine's severe, documented background-load variance --
+# two sequential runs could differ simply because of what the machine
+# was doing during each run's window, independent of any real
+# difference between the strategies. Interleaving removes that shared
+# noise source from the comparison, the same way a paired test removes
+# it, rather than an independent two-sample test.
+#
+# PREREQUISITE: two gateway instances already running, see
+# compare_interleaved.py's module docstring for the exact commands.
+#
+# SAMPLE SIZE / ARRIVAL RATE
+# -----------------------------
+# Same values as gateway_dispatch_round_robin_baseline.yaml (0.4 RPS,
+# 120s, 5s warmup), for the same calibrated reason: manual testing
+# showed ~2.1-2.2s real dispatch-failure latency per request on this
+# hardware, and a strictly sequential load loop falls behind schedule
+# if arrival rate implies a shorter inter-arrival time than that. This
+# is now running as TWO independent 0.4 RPS schedules concurrently
+# (one per arm), not one combined 0.8 RPS schedule, each arm keeps
+# its own calibrated headroom.
+
+name: semantic_vs_round_robin
+arrival_rate_rps: 0.4
+duration_seconds: 120
+warmup_seconds: 5
+expected_status_codes: [200]
+
+variants:
+  - label: "round_robin"
+    target_url: "http://127.0.0.1:8080/v1/chat/completions"
+  - label: "semantic"
+    target_url: "http://127.0.0.1:8081/v1/chat/completions"
+
+request_body:
+  model: "phi3:mini"
+  messages:
+    - role: "user"
+      content: "What is 2+2?"
+  max_tokens: 50
+
+auth_header: null

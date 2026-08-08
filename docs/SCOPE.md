@@ -58,24 +58,42 @@ ever built, it belongs in these same three files, for real.
 
 ## Immediate next step
 
-`SemanticRouter` wiring is done and confirmed by a full local
-`cargo test` run (37/37 gateway, 84/84 router, both green). See
-commits `c3637a7` and `90c5fc5` for the exact changes.
+The SemanticRouter-vs-RoundRobinRouter interleaved benchmark
+(`benchmarks/scenarios/semantic_vs_round_robin.yaml`,
+`benchmarks/harness/compare_interleaved.py`) is built, runs, and
+produces real, committed results, but the result itself is not yet
+resolved. Six runs against the corrected topology (both workers
+answered by `stub_worker.py`, a real always-up HTTP stub, not a
+permanently-unreachable address, see that commit's message for why
+the first two topologies both broke `WorkerRegistry`'s health tracking
+instead of measuring anything) show SemanticRouter's gateway-side
+p50 latency clustering into two distinct stacks: exactly 47.00ms in
+three runs, 141-171ms in the other three. This is not sampling noise
+around one true value, a real spread would not repeat the same figure
+to the decimal across independent runs. Something in the request path
+takes one of two distinct costs, and which one a given run mostly
+lands on has not yet been isolated.
 
-The natural next artifact is a **benchmark comparing SemanticRouter
-against RoundRobinRouter, run interleaved** (both strategies' requests
-close together in time within the same run) rather than as two
-separate runs — this is far more robust to this machine's documented
-wide CPU-only inference latency variance (2.8s-337s for an identical
-prompt, see the earlier benchmark retrospective) than an absolute
-number would be, because both strategies experience roughly the same
-noise floor and the *difference* between them remains a meaningful
-signal even when the absolute numbers are noisy. This produces the
-project's first real, defensible "X beats Y" claim with a method,
-rather than an architecture description with no measurement behind it.
+Two plausible mechanisms were traced against the real code and ruled
+out: `SemanticRouter::route()`'s branch selection (the `reason` field)
+does not change between clusters, `any_warmed` is false for the entire
+benchmark since `cache-oracle` is never running, every request takes
+the same `fallback:round_robin_pre_warmup` path regardless of which
+latency cluster it falls into. `HttpSignalsProvider`'s staleness
+cutover (cache starts fresh at construction, goes permanently stale
+roughly 10s after process start since no poll ever succeeds) is a
+real, confirmed state transition, but both the fresh and stale paths
+feed into the same `any_warmed=false` branch, so it cannot explain a
+route()-level difference either, at least not through the mechanism
+initially suspected.
 
-Parallel-track candidates that don't block on the above and don't
-require resolving the Ollama/vLLM backend question: `stratum-raft`
-(self-contained, no backend dependency) and `experiment-engine`'s
-mSPRT sequential testing (validated via Monte Carlo simulation against
-synthetic data, not live traffic — also backend-independent).
+Two diagnostic trace points were added (commits `37bc02e`, `30c3105`)
+to correlate a future run against real per-request state instead of
+inferring it from latency alone: cache staleness state and age on
+every signals read, and explicit timing around the one call in
+`route()` with no equivalent in `RoundRobinRouter::route()`. Neither
+has been read against a real run yet, that's the actual next step,
+not a fourth hypothesis. Run the benchmark once with `RUST_LOG=debug`
+on the semantic instance, then correlate the `signals_fetch_us` and
+`signals_cache_stale` trace lines against which half of that run's
+requests landed in which latency cluster.

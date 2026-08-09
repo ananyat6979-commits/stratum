@@ -21,3 +21,7 @@ skills.md
 
 # Runtime-generated event log databases (test and manual-run artifacts)
 *.redb
+
+# Git bundle files used as one-time commit-delivery artifacts, not
+# meant to be tracked once their commits are merged into main
+*.bundle

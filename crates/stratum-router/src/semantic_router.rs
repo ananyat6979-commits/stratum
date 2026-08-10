@@ -115,12 +115,12 @@ pub struct SemanticRouter<P: WorkerSignalsProvider> {
     /// something at least as good as the strategy this one replaces.
     fallback_counter: std::sync::atomic::AtomicU64,
     /// Per-worker cache-hit indices. Computed locally and synchronously
-    /// -- this signal cannot come from the HTTP-polled signals_provider
+    /// , this signal cannot come from the HTTP-polled signals_provider
     /// because cache_hit_prob is a (request, worker) pair signal, not
     /// worker-state. See cache_hit_index.rs's module doc and ADR-009.
     /// The wire value from signals_provider for cache_hit_prob is
     /// explicitly discarded and overwritten with this index's result
-    /// -- see route()'s scoring section.
+    /// ,see route()'s scoring section.
     cache_hit_indices: Arc<RwLock<HashMap<String, CacheHitIndex>>>,
 }
 
@@ -153,7 +153,7 @@ impl<P: WorkerSignalsProvider> SemanticRouter<P> {
     /// Record that a routing decision sent `prompt` to `worker_id`.
     ///
     /// MUST be called after route() returns and the request has been
-    /// dispatched -- never from inside route() itself. This keeps
+    /// dispatched, never from inside route() itself. This keeps
     /// route() free of mutation, preserving its determinism, and keeps
     /// the cache-hit index's write path explicit and separate from the
     /// read (scoring) path used during routing.
@@ -167,7 +167,7 @@ impl<P: WorkerSignalsProvider> SemanticRouter<P> {
 
     /// Query the local cache-hit index for a specific worker and prompt.
     /// Returns 0.0 if this worker has no index yet (nothing routed to it
-    /// so far) -- same "no data, no false positive" default as an empty
+    /// so far), same "no data, no false positive" default as an empty
     /// CacheHitIndex.
     fn local_cache_hit_prob(&self, worker_id: &str, prompt: &str) -> f64 {
         let indices = self.cache_hit_indices.read().unwrap();
@@ -235,7 +235,7 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
         // SLA class is inferred from a "sla:<class>:" prefix convention on
         // replay_key, mirroring the "session:<id>:" convention used for
         // affinity. Defaults to Batch (most permissive bucket) if absent,
-        // since gateway-level SLA assignment already happened upstream --
+        // since gateway-level SLA assignment already happened upstream,
         // this is a defense-in-depth check, not the primary enforcement point.
         let sla_class = infer_sla_class(replay_key);
         if self.backpressure.check(sla_class) == BackpressureDecision::Shed {
@@ -244,7 +244,7 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
 
         // FIX 1: filter to registry-routable workers before any scoring.
         // A worker absent from the registry is treated as routable (registry
-        // is opt-in health tracking, not a whitelist) -- only workers
+        // is opt-in health tracking, not a whitelist), only workers
         // EXPLICITLY marked Unavailable are excluded. Previously only
         // try_affinity_route consulted the registry, for a single candidate;
         // every other request ignored health state entirely.
@@ -272,12 +272,11 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
 
         // Fetch oracle signals for all routable workers.
         //
-        // Timed explicitly around this call for the semantic_vs_round_robin
-        // benchmark's bimodal latency investigation -- this isolates
-        // signals_provider's cost specifically from everything else route()
-        // does, since it's the one call in this function with no equivalent
-        // in RoundRobinRouter::route(). Safe to remove once that
-        // investigation concludes.
+        // From the semantic_vs_round_robin benchmark's bimodal latency
+        // investigation (closed, cause not found in application code,
+        // see docs/SCOPE.md's "Resolved" section). signals_fetch_us was
+        // confirmed stable (255-626us) across both observed latency
+        // regimes, ruling this call out as the cause.
         let worker_ids: Vec<&str> = routable.iter().map(|w| w.worker_id.as_str()).collect();
         let signals_fetch_start = std::time::Instant::now();
         let oracle_signals = self.signals_provider.signals_for_workers(&worker_ids);
@@ -302,7 +301,7 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
         // observations to be trusted, score-based selection would compare
         // identical neutral() signals across every candidate, and
         // select_best_worker's strict `>` tie-break pins every request to
-        // index 0 -- silently disabling load distribution during the exact
+        // index 0, silently disabling load distribution during the exact
         // window (cold start, cache empty) where it matters most. This is
         // a regression versus RoundRobinRouter, the strategy being replaced.
         // Fall back to the same round-robin pattern until the oracle warms up.
@@ -334,10 +333,10 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
                 };
                 // OVERWRITE: cache_hit_prob from the HTTP wire is always a
                 // placeholder (api.py permanently reports 0.0 for this field
-                // -- see cache_hit_index.rs's module doc). Replace it with
+                //  see cache_hit_index.rs's module doc). Replace it with
                 // the local, synchronous, per-(request,worker) computation,
                 // which is the only architecturally-correct source for this
-                // specific signal. This is intentional, not a bug -- the
+                // specific signal. This is intentional, not a bug, the
                 // wire value is discarded on purpose, every time.
                 signals.cache_hit_prob = self.local_cache_hit_prob(&s.worker_id, prompt);
                 signals
@@ -370,7 +369,7 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
 }
 
 /// Infer the router-tier SLA class from a replay_key's optional
-/// "sla:<class>:" prefix. Defaults to Batch if absent or unrecognized --
+/// "sla:<class>:" prefix. Defaults to Batch if absent or unrecognized,
 /// this is a secondary defense-in-depth check; the gateway already
 /// enforces SLA-aware rate limiting upstream, so an unparseable class
 /// here should fail open to the least-privileged bucket, not error out.
@@ -629,8 +628,8 @@ mod tests {
         // AppState does) could previously reach record_routing_outcome
         // without downcasting. Proves the default-method wiring on the
         // trait fixes that, by calling record_outcome exclusively through
-        // a `&dyn RouterStrategy` reference -- never touching the
-        // concrete SemanticRouter type after construction -- and
+        // a `&dyn RouterStrategy` reference, never touching the
+        // concrete SemanticRouter type after construction, and
         // confirming it has the same effect as calling the inherent
         // method directly (per cache_hit_prob_from_history_influences_selection
         // above).
@@ -660,13 +659,13 @@ mod tests {
     #[test]
     fn round_robin_record_outcome_is_a_harmless_default_noop() {
         // RouterStrategy::record_outcome's default implementation must
-        // exist and do nothing for strategies that don't override it --
+        // exist and do nothing for strategies that don't override it,
         // this is what makes it safe for stratum-gateway to call
         // unconditionally on `Arc<dyn RouterStrategy>` regardless of
         // which concrete strategy is active.
         let router = crate::router::RoundRobinRouter::new();
         let strategy: &dyn RouterStrategy = &router;
-        // Must not panic. Nothing to assert beyond that -- absence of
+        // Must not panic. Nothing to assert beyond that, absence of
         // a panic/side effect *is* the contract for the default case.
         strategy.record_outcome("worker-0", "any prompt");
     }
@@ -681,7 +680,7 @@ mod tests {
             bp,
         );
 
-        // No record_routing_outcome calls -- both workers have no history
+        // No record_routing_outcome calls, both workers have no history
         let prob = router.local_cache_hit_prob("worker-0", "any prompt");
         assert_eq!(prob, 0.0);
     }
@@ -690,14 +689,14 @@ mod tests {
     fn wire_cache_hit_prob_is_overwritten_not_trusted() {
         // Even if the MockSignalsProvider returns a HIGH cache_hit_prob on
         // the wire, route() must overwrite it with the local computation
-        // (which will be 0.0 for an unrecorded prompt) -- proving the
+        // (which will be 0.0 for an unrecorded prompt), proving the
         // wire value is genuinely discarded, not accidentally blended in.
         let registry = Arc::new(WorkerRegistry::new());
         let bp = Arc::new(BackpressureController::with_defaults());
         let router = SemanticRouter::new(
             registry,
             Arc::new(MockSignalsProvider::warmed(RoutingSignals {
-                cache_hit_prob: 0.99, // wire says "definitely a hit" -- must be ignored
+                cache_hit_prob: 0.99, // wire says "definitely a hit", must be ignored
                 predicted_latency_ms: 50.0,
                 sla_affinity: 0.5,
                 kv_pressure: 0.1,
@@ -706,10 +705,10 @@ mod tests {
         );
         let workers = test_workers(1);
 
-        // No routing history recorded for worker-0 -- local computation
+        // No routing history recorded for worker-0, local computation
         // must yield 0.0, overriding the wire's 0.99
         let decision = router.route("key", "unrecorded prompt", &workers).unwrap();
-        // With only one worker, this always "succeeds" at selecting it --
+        // With only one worker, this always "succeeds" at selecting it,
         // the real assertion is in the score, which should reflect the
         // OVERWRITTEN cache_hit_prob=0.0, not the wire's 0.99
         assert!(

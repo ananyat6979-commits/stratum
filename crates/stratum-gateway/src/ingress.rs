@@ -51,7 +51,7 @@ pub struct AppState {
     /// `AppState::new`), `SemanticRouter` when constructed via
     /// `AppState::with_semantic_router`. Held as a trait object so
     /// `handle_chat_completions` doesn't need to know which strategy is
-    /// active -- including for `record_outcome`, see
+    /// active, including for `record_outcome`, see
     /// `RouterStrategy::record_outcome`'s doc comment in stratum-router.
     pub router: Arc<dyn RouterStrategy>,
     /// The event log this gateway writes routing decisions to. Shared
@@ -61,7 +61,7 @@ pub struct AppState {
     /// Static worker list, used directly when `worker_registry` is `None`.
     /// When a registry is present (`with_semantic_router`), the registry's
     /// `routable_workers()` is used instead on every request, so this
-    /// field's contents become stale on purpose -- it's only the initial
+    /// field's contents become stale on purpose, it's only the initial
     /// seed the registry was populated from at construction time. Kept
     /// (rather than removed) so `AppState::new`'s existing static-list
     /// behavior, and every existing test built on it, is unchanged.
@@ -72,7 +72,7 @@ pub struct AppState {
     /// on). `Some` for `AppState::with_semantic_router`, which is also
     /// the only constructor that populates it and the only one where
     /// `record_success`/`record_failure` are called from the dispatch
-    /// path -- see `handle_chat_completions`.
+    /// path: see `handle_chat_completions`.
     pub worker_registry: Option<Arc<WorkerRegistry>>,
     /// HTTP client used to dispatch requests to the routed worker.
     /// Constructed once and cloned (reqwest::Client is internally
@@ -138,12 +138,12 @@ impl AppState {
     ///   at startup. Unlike `AppState::new`'s static list, this registry
     ///   is mutable afterward (health state changes as requests succeed
     ///   or fail) even though the constructor's input is still a fixed
-    ///   list -- there's no dynamic worker discovery yet, only dynamic
+    ///   list, there's no dynamic worker discovery yet, only dynamic
     ///   health tracking of a fixed worker set. Full discovery is a
     ///   separate, later piece of work, not blocked on this one.
     /// * `cache_oracle_base_url` - e.g. `"http://127.0.0.1:8001"`. Must
     ///   point at a reachable cache-oracle for oracle signals to be
-    ///   anything other than the neutral/unwarmed default -- see
+    ///   anything other than the neutral/unwarmed default, see
     ///   `HttpSignalsProvider::new`'s doc comment for staleness handling
     ///   if the oracle is unreachable or goes down after startup.
     ///
@@ -331,18 +331,12 @@ async fn handle_chat_completions(
     // the static list every other constructor uses unchanged. This is the
     // one place routing decisions and dispatch see different worker sets
     // depending on which AppState constructor built this instance.
-    // Timed explicitly: this is the one place per-request cost differs
-    // structurally between the semantic and round_robin paths that
-    // hasn't yet been measured. registry.routable_workers() clones
-    // every WorkerSpec in the registry on every call; round_robin's
-    // state.workers.clone() clones a static Vec held once in AppState.
-    // Prior investigation (see semantic_router.rs and
-    // http_signals_provider.rs diagnostic commits) ruled out route()'s
-    // branch selection and HttpSignalsProvider's cache read as the
-    // source of the bimodal p50 clustering seen in
-    // semantic_vs_round_robin.yaml (six runs, 47ms vs 141-171ms, no
-    // spread between). This is the remaining candidate. Safe to remove
-    // once the investigation concludes.
+    // From the semantic_vs_round_robin benchmark's bimodal latency
+    // investigation (closed, cause not found in application code, see
+    // docs/SCOPE.md's "Resolved" section). effective_workers_us was
+    // confirmed stable (4-6us) across both observed latency regimes,
+    // roughly two orders of magnitude too small to explain the ~100ms
+    // swing between clusters, ruling this out as the cause too.
     let effective_workers_start = std::time::Instant::now();
     let effective_workers: Vec<WorkerSpec> = match &state.worker_registry {
         Some(registry) => registry.routable_workers(),
@@ -413,7 +407,7 @@ async fn handle_chat_completions(
             //
             // - router.record_outcome(): populates SemanticRouter's
             //   cache-hit index for this (worker, prompt) pair. A no-op
-            //   for RoundRobinRouter via the trait's default method --
+            //   for RoundRobinRouter via the trait's default method,
             //   see RouterStrategy::record_outcome's doc comment.
             // - worker_registry.record_success(): resets the worker's
             //   consecutive-failure counter, restoring Degraded -> Healthy
@@ -573,7 +567,7 @@ mod tests {
     /// deliberately-unreachable worker (port 0, same rationale as
     /// `test_state_with_unreachable_worker`), and an `HttpSignalsProvider`
     /// pointed at a cache-oracle base URL that is never actually queried
-    /// by these tests (port 0 as well) -- staleness handling means an
+    /// by these tests (port 0 as well), staleness handling means an
     /// unreachable oracle degrades to neutral/unwarmed signals rather than
     /// erroring, so this is a valid, deterministic test configuration, not
     /// a shortcut. See `HttpSignalsProvider::new`'s doc comment.
@@ -765,7 +759,7 @@ mod tests {
     // the mechanism works in isolation; these prove the gateway actually
     // calls it, on the real request path, with a real WorkerRegistry
     // whose state changes are then visible to routing on the *next*
-    // request -- the actual end-to-end claim docs/SCOPE.md's "immediate
+    // request, the actual end-to-end claim docs/SCOPE.md's "immediate
     // next step" was about.
 
     #[tokio::test]
@@ -789,7 +783,7 @@ mod tests {
         // registry via handle_chat_completions' new record_failure calls,
         // and once the worker crosses the Unavailable threshold (10
         // consecutive failures, see WorkerRegistry::record_failure),
-        // routable_workers() excludes it -- so routing itself fails
+        // routable_workers() excludes it, so routing itself fails
         // closed (503, "no workers available") rather than continuing to
         // dispatch-and-fail (502) against a worker already known to be down.
         let state = test_state_with_semantic_router();
@@ -863,7 +857,7 @@ mod tests {
         // depends on) must have worker_registry == None, and dispatch
         // failures against it must not panic or behave differently now
         // that the registry-recording calls exist in the dispatch match
-        // arms -- they're guarded by `if let Some(registry)`, this proves
+        // arms, they're guarded by `if let Some(registry)`, this proves
         // that guard actually works when the value is None, not just that
         // it compiles.
         let state = test_state_with_unreachable_worker();

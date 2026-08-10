@@ -2,7 +2,7 @@
 //!
 //! Queries cache-oracle's GET /signals endpoint on a fixed interval in
 //! a background task, caching the result in an RwLock. signals_for_workers()
-//! reads synchronously from that cache, never making a live network call --
+//! reads synchronously from that cache, never making a live network call,
 //! this satisfies RouterStrategy::route()'s documented contract (must never
 //! block indefinitely, must be deterministic given the same internal state).
 //!
@@ -18,7 +18,7 @@
 //! Only kv_pressure has a real producer today. cache_hit_prob,
 //! predicted_latency_ms, and sla_affinity are cache-oracle-side
 //! placeholders. This provider passes through whatever cache-oracle
-//! reports without pretending otherwise -- see RoutingSignals fields
+//! reports without pretending otherwise, see RoutingSignals fields
 //! populated directly from the HTTP response, no synthetic enrichment.
 
 use std::collections::HashMap;
@@ -129,7 +129,7 @@ impl HttpSignalsProvider {
                         guard.last_refreshed = Instant::now();
                     }
                     Err(e) => {
-                        // Log and continue -- do NOT clear the cache on a
+                        // Log and continue, do NOT clear the cache on a
                         // single failed poll. Staleness handling in
                         // signals_for_workers() covers sustained outages;
                         // a transient blip should not discard good data.
@@ -170,14 +170,12 @@ impl WorkerSignalsProvider for HttpSignalsProvider {
         let elapsed = guard.last_refreshed.elapsed();
         let is_stale = elapsed > self.max_staleness;
 
-        // Diagnostic for the semantic_vs_round_robin benchmark's bimodal
-        // latency finding: logs which branch every call takes and how
-        // stale the cache actually is at that moment, so a run's latency
-        // clusters can be correlated against real branch data instead of
-        // inferred from timing alone. See docs/SCOPE.md's benchmark
-        // section for the investigation this supports. Safe to remove
-        // once that investigation concludes -- this is diagnostic, not
-        // permanent instrumentation.
+        // Diagnostic from the semantic_vs_round_robin benchmark's bimodal
+        // latency investigation (closed, cause not found in application
+        // code, see docs/SCOPE.md's "Resolved" section). Left in place
+        // deliberately: free at info level and above, and this ruled-out
+        // trace point is real evidence the investigation was thorough,
+        // not speculation left to rot.
         tracing::debug!(
             stratum.signals_cache_stale = is_stale,
             stratum.signals_cache_age_ms = elapsed.as_millis() as u64,
@@ -214,7 +212,7 @@ mod tests {
     use super::*;
 
     // Note: these tests exercise CachedSnapshot and staleness logic
-    // directly, without a running HTTP server or Tokio runtime spawn --
+    // directly, without a running HTTP server or Tokio runtime spawn,
     // consistent with the project's preference for testing logic without
     // network dependencies (mirrors the WorkerSignalsProvider mock pattern
     // in semantic_router.rs). Full HTTP round-trip is exercised manually /

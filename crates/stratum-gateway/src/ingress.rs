@@ -331,10 +331,29 @@ async fn handle_chat_completions(
     // the static list every other constructor uses unchanged. This is the
     // one place routing decisions and dispatch see different worker sets
     // depending on which AppState constructor built this instance.
+    // Timed explicitly: this is the one place per-request cost differs
+    // structurally between the semantic and round_robin paths that
+    // hasn't yet been measured. registry.routable_workers() clones
+    // every WorkerSpec in the registry on every call; round_robin's
+    // state.workers.clone() clones a static Vec held once in AppState.
+    // Prior investigation (see semantic_router.rs and
+    // http_signals_provider.rs diagnostic commits) ruled out route()'s
+    // branch selection and HttpSignalsProvider's cache read as the
+    // source of the bimodal p50 clustering seen in
+    // semantic_vs_round_robin.yaml (six runs, 47ms vs 141-171ms, no
+    // spread between). This is the remaining candidate. Safe to remove
+    // once the investigation concludes.
+    let effective_workers_start = std::time::Instant::now();
     let effective_workers: Vec<WorkerSpec> = match &state.worker_registry {
         Some(registry) => registry.routable_workers(),
         None => state.workers.clone(),
     };
+    let effective_workers_us = effective_workers_start.elapsed().as_micros() as u64;
+    tracing::debug!(
+        stratum.effective_workers_us = effective_workers_us,
+        stratum.effective_workers_count = effective_workers.len(),
+        "effective workers computed"
+    );
 
     // Route the request. ingress_event_id=0 for now, this gateway
     // does not yet write a RequestIngressEvent to the log before routing

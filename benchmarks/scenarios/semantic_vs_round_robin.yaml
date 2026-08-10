@@ -40,6 +40,18 @@
 # PREREQUISITE: two gateway instances already running, see
 # compare_interleaved.py's module docstring for the exact commands.
 #
+#
+# OPERATIONAL NOTE: both gateway instances have been observed exiting
+# unexpectedly (STATUS_CONTROL_C_EXIT, 0xc000013a) after running
+# unattended for extended periods (10+ minutes) on Windows, always
+# the semantic instance, always mid-poll to cache-oracle. No panic
+# message accompanies it, this is a console control event, not an
+# application error, most likely tied to terminal focus/session state
+# on this machine rather than anything in stratum-gateway itself.
+# Keep both terminal windows active (not minimized/backgrounded) for
+# runs longer than a few minutes, and verify both instances are still
+# listening (see the Invoke-RestMethod check above) immediately before
+# each benchmark run, not just once at the start of a session.
 # SAMPLE SIZE / ARRIVAL RATE
 # -----------------------------
 # Same values as gateway_dispatch_round_robin_baseline.yaml (0.4 RPS,

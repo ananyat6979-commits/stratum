@@ -56,54 +56,54 @@ ever built, it belongs in these same three files, for real.
 | `experiment-engine`, `eval-fabric`, `reliability-model`, `synthgen` (Python) | `pyproject.toml` only, zero implementation files | Not started. No `msprt.py`, `estimator.py`, `cusum.py`, or `survival.py` exist. Any prior document citing these paths at a specific proficiency level was describing planned work, not completed work. |
 | Custom Raft, mSPRT sequential testing, doubly-robust causal estimation, synthetic data generation, NUMA-aware scheduling | Not started | Real, well-specified ideas in the original design blueprint. None require the backend-choice resolution above except scheduling/chaos, so these are legitimate next-phase candidates once the wiring below is finished. |
 
-## Resolved: the bimodal semantic_vs_round_robin latency is not caused by any traced STRATUM code path
+## Resolved: semantic_vs_round_robin's latency spread is machine variance, not a code-path effect
 
-Three diagnostic trace points were added across the semantic request
-path and checked against a real run with `RUST_LOG=debug`:
+The prior version of this section, written after 6 runs, described
+this as two discrete latency clusters and closed the investigation
+around ruling out three specific STRATUM code paths as the cause of
+that clustering. Re-checked against the full 22 committed runs and
+corrected: what 6 runs made look like two discrete stacks (47ms vs
+141-171ms, nothing between) is, across all 19 clean runs (n_success=49
+on both arms, excluding 2 runs broken by the pre-stub_worker topology
+and 1 run truncated by the crash documented below), closer to a
+continuous, right-skewed spread: 46, 46, 46, 46, 47, 47, 47, 48, 62,
+63, 133, 141, 156, 156, 157, 171, 172, 173, 203 (ms, sorted).
 
-- `HttpSignalsProvider`'s cache read: `signals_fetch_us` consistently
-  255-626us across the entire run, both latency regimes.
-- `SemanticRouter::route()`'s branch selection: constant throughout,
-  `any_warmed` is false on every request since cache-oracle is never
-  running in this benchmark, every request takes the identical
-  `fallback:round_robin_pre_warmup` path.
-- `handle_chat_completions`'s `effective_workers` computation:
-  `effective_workers_us` consistently 4-6us across the entire run,
-  tiny and stable. This was the leading hypothesis after the first two
-  were ruled out; the actual measured cost of cloning two `WorkerSpec`
-  values is roughly two orders of magnitude too small to explain a
-  p50 swing between ~47ms and ~150ms, and the trace confirms it
-  tracks neither latency cluster.
+The decisive evidence this correction rests on: round_robin's own p50, a strategy with no oracle call, no cache lookup, no registry, only
+an atomic increment, swings from 139ms to 187ms across these same 19
+runs, a 35% range on the simplest possible code path. If the arm with
+no plausible mechanism for variance still varies this much, the
+variance is a property of the machine and measurement conditions
+(background load, OS scheduling, this repository's already-documented
+severe inference-latency variance elsewhere, see skills.md and
+benchmarks/README.md), not of SemanticRouter's specific logic.
 
-Every piece of STRATUM's own code that sits on the semantic request
-path and was instrumented is fast and stable. None of it explains the
-observed bimodal p50 clustering (47.00ms exactly in three of six
-committed runs, 141-171ms in the other three). The cause is not in
-application logic that has been checked. Remaining candidates, none
-yet investigated, roughly in order of likely payoff: OS-level thread
-scheduling variance on this specific Windows development machine
-(consistent with the severe, independently-documented inference
-latency variance elsewhere in this project, see skills.md and
-benchmarks/README.md), reqwest connection-pool warmup/reuse behavior
-differing between the two gateway processes' first N requests, or
-something in Tokio's multi-threaded runtime scheduler specifically
-under this benchmark's concurrent-arms setup (both arms share one
-Python asyncio event loop in compare_interleaved.py, but each targets
-a separate OS process, so this candidate would need to be about the
-Rust side's own tokio runtime, not the harness).
+The three diagnostic trace points added during the original
+investigation (HttpSignalsProvider's cache read, SemanticRouter::route()'s
+signals fetch, handle_chat_completions's effective_workers computation)
+remain correct and remain useful: each measured consistently fast and
+stable (255-626us, 4-6us respectively) in the one debug-level run they
+were checked against, which is real evidence ruling out gross
+inefficiency in those specific paths, even though it was insufficient
+on its own to explain the full run-to-run p50 range, because that
+range turns out to not be caused by any single request-scoped cost at
+all.
 
-Diagnostic tracing (3 debug-level trace points, in
-http_signals_provider.rs, semantic_router.rs, ingress.rs) is left in
-place rather than removed. It is free at info level and above, which
-is what every other logged run in this project actually uses, and it
-documents a real, completed investigation rather than speculation.
+This is now closed as: the semantic arm shows real, measurable overhead
+relative to round_robin in aggregate (median-of-medians across the 19
+clean runs: round_robin ~156ms, semantic ~144ms, overlapping, not
+separable at this sample size and duration) with both arms subject to
+substantial shared machine-level variance that swamps any per-request
+routing-overhead signal at this benchmark's current duration (120s,
+~49 requests per arm per run). A statistically defensible answer to
+"what is SemanticRouter's routing overhead" requires either
+substantially longer runs (more samples per run reduces the CI width
+directly) or a controlled environment with less background variance
+than this development machine provides. Not pursuing either right now: see "Immediate next step" below for why.
 
-This is closed as "cause not found in application code" rather than
-"cause found." All 9 committed benchmark runs remain valid data
-documenting the observed behavior; none are retracted or need
-re-running. Revisit only if routing-quality work (Phase 2, real
-Ollama inference, see below) surfaces the same pattern somewhere it
-would matter more.
+All 22 committed runs remain valid data; none are retracted. This
+correction changes only the interpretation, not the underlying
+measurements, which were always accurately recorded.
 
 ## Operational note: gateway process instability during long benchmark sessions
 
@@ -112,7 +112,7 @@ Both gateway instances have now exited unexpectedly
 sessions, both times the semantic instance, both times with no panic
 message, both times during a live benchmark run rather than idle.
 This has moved from "possible one-off" to "reproducible enough to
-plan around." No root cause identified yet -- no panic means this is
+plan around." No root cause identified yet: no panic means this is
 either an external signal (terminal/session/OS level, not a Rust
 panic) or a crash mode that isn't producing a panic message before
 exit, which are different problems requiring different fixes. Treat
@@ -123,3 +123,8 @@ step is running the gateway under a process supervisor that captures
 exit reason (e.g. `wintun`/Task Scheduler with failure logging, or
 simply capturing stdout/stderr to a file across the whole session)
 rather than continuing to diagnose from terminal scrollback alone.
+
+Affects one committed run directly (`ad62d6d2`, 2026-08-06, both arms
+truncated to 15-18 successful requests out of 49 before the crash),
+excluded from the clean-run analysis above for that reason, not
+retracted.

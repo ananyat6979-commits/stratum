@@ -105,6 +105,20 @@ All 22 committed runs remain valid data; none are retracted. This
 correction changes only the interpretation, not the underlying
 measurements, which were always accurately recorded.
 
+This pooling was checked twice: first against commit messages alone
+(`git log --oneline`) across the range spanning all 22 runs, which
+was insufficient evidence and treated as such. Second, against the
+actual line-by-line diffs (`git log -p`) for every commit touching
+main.rs, semantic_router.rs, http_signals_provider.rs, ingress.rs, and
+the scenario file across the full range. Confirmed: every change in
+that range is either the scenario file's original creation, the
+additive second-worker support, or a tracing::debug! call that
+performs no work unless RUST_LOG=debug is set, which none of these 19
+runs had set (all logged at INFO level only). No commit in range
+altered routing logic, timeouts, or worker registration in a way that
+would affect measured latency. The pooling is correct on verified
+evidence, not inferred from commit message summaries.
+
 ## Operational note: gateway process instability during long benchmark sessions
 
 Both gateway instances have now exited unexpectedly

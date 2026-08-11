@@ -61,17 +61,35 @@ ever built, it belongs in these same three files, for real.
 The prior version of this section, written after 6 runs, described
 this as two discrete latency clusters and closed the investigation
 around ruling out three specific STRATUM code paths as the cause of
-that clustering. Re-checked against the full 22 committed runs and
-corrected: what 6 runs made look like two discrete stacks (47ms vs
-141-171ms, nothing between) is, across all 19 clean runs (n_success=49
-on both arms, excluding 2 runs broken by the pre-stub_worker topology
-and 1 run truncated by the crash documented below), closer to a
-continuous, right-skewed spread: 46, 46, 46, 46, 47, 47, 47, 48, 62,
-63, 133, 141, 156, 156, 157, 171, 172, 173, 203 (ms, sorted).
+that clustering. Re-checked against the full 22 committed runs, using
+benchmarks/harness/aggregate_runs.py's actual output (not hand-tallied
+values), corrected: what 6 runs made look like two discrete stacks
+(47ms vs 141-171ms, nothing between) is, across the 17 clean runs
+(n_success=49 on both arms; of the 22 committed runs, 5 are excluded:
+2 broken by the pre-stub_worker topology, 1 truncated by the crash
+documented below, and 2 more with a lower n_success than initially
+tallied when this section was first written), closer to a continuous,
+right-skewed spread: 46, 46, 46, 47, 47, 47, 62, 63, 140, 141, 156,
+156, 156, 157, 171, 172, 203 (ms, sorted, semantic arm).
+
+An earlier version of this section stated 19 clean runs and a
+19-value sorted list containing a value (133) that no committed run
+actually produced, and a run count that did not match
+aggregate_runs.py's own output once that script was fixed and finally
+run to completion. That was a real error, a sorted list assembled by
+hand from partial data across several messages rather than generated
+from the committed files directly, exactly the class of mistake this
+section already exists to correct once (see the paragraph on 6-vs-22
+below). Caught by finally running aggregate_runs.py against all 22
+committed files and comparing its literal printed output against this
+section's text, rather than trusting that they already matched.
 
 The decisive evidence this correction rests on: round_robin's own p50, a strategy with no oracle call, no cache lookup, no registry, only
-an atomic increment, swings from 139ms to 187ms across these same 19
-runs, a 35% range on the simplest possible code path. If the arm with
+an atomic increment, ranges 139.99-187.99ms (17 values, sorted:
+140, 140, 140, 140, 141, 141, 141, 156, 156, 156, 156, 156, 156, 156,
+157, 157, 188, floating-point-rounded to whole milliseconds in the
+prose above) across these same 17 runs, a 34% range on the simplest
+possible code path. If the arm with
 no plausible mechanism for variance still varies this much, the
 variance is a property of the machine and measurement conditions
 (background load, OS scheduling, this repository's already-documented
@@ -90,20 +108,25 @@ range turns out to not be caused by any single request-scoped cost at
 all.
 
 This is now closed as: the semantic arm shows real, measurable overhead
-relative to round_robin in aggregate (median-of-medians across the 19
-clean runs: round_robin ~156ms, semantic ~144ms, overlapping, not
-separable at this sample size and duration) with both arms subject to
-substantial shared machine-level variance that swamps any per-request
+relative to round_robin in aggregate (median across the 17 clean runs:
+round_robin 156ms, semantic 140ms, overlapping, not separable at
+this sample size and duration) with both arms subject to substantial
+shared machine-level variance that swamps any per-request
 routing-overhead signal at this benchmark's current duration (120s,
 ~49 requests per arm per run). A statistically defensible answer to
 "what is SemanticRouter's routing overhead" requires either
 substantially longer runs (more samples per run reduces the CI width
 directly) or a controlled environment with less background variance
-than this development machine provides. Not pursuing either right now: see "Immediate next step" below for why.
+than this development machine provides. Not pursuing either right now, see "Immediate next step" below for why.
 
 All 22 committed runs remain valid data; none are retracted. This
 correction changes only the interpretation, not the underlying
-measurements, which were always accurately recorded.
+measurements, which were always accurately recorded. The run-count and
+sorted-list correction above is different in kind from that: it is a
+fix to a transcription error in this document's own prose, not a
+reinterpretation of data, and it was only caught by mechanically
+re-running aggregate_runs.py and diffing its literal output against
+this section, rather than trusting the two already agreed.
 
 This pooling was checked twice: first against commit messages alone
 (`git log --oneline`) across the range spanning all 22 runs, which

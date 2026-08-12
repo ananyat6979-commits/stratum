@@ -65,12 +65,11 @@ for it). The first full run of this suite after that change measured
 it directly, at the real N_SIMULATIONS=5000 scale rather than a
 separate smaller diagnostic: 0.0696. The parametrization below now
 uses that measured value, closing the gap the original comment flagged
-rather than leaving it open. alpha=0.01's expected_rate is still
-alpha itself, unverified against a direct measurement, since that case
-has passed at every tolerance tried so far and a placeholder that
-keeps passing doesn't carry the same urgency as one that was actively
-failing, noted here explicitly as a real, remaining gap, not
-silently assumed resolved by the other two being fixed.
+rather than leaving it open. alpha=0.01's expected_rate was, for a period, left as alpha itself,
+explicitly flagged as unverified. Measured directly via an isolated
+single-case run (not a full-suite run, given two prior mistakes on
+this exact line): 0.009. All three alpha levels now have a directly
+measured expected_rate, not an assumed one.
 """
 
 from __future__ import annotations
@@ -159,7 +158,11 @@ class TestMSPRTType1ErrorControl:
             # noted as a real gap, not silently assumed identical
             # behavior, see the follow-up item this leaves open.
             (0.05, 0.05, 0.036, 0.0110),
-            (0.01, 0.01, 0.01, 0.0080),
+            # Measured directly, isolated single-case run, not folded
+            # into a full suite run this time given the two prior
+            # mistakes on this exact line (an unverified guess, then
+            # literal placeholder text accidentally committed as code).
+            (0.01, 0.01, 0.009, 0.0080),
             # 0.10's expected_rate was originally left as alpha itself,
             # explicitly flagged at the time as unverified, no
             # diagnostic run had actually been done for this

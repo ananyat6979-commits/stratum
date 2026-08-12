@@ -159,7 +159,7 @@ class TestMSPRTType1ErrorControl:
             # noted as a real gap, not silently assumed identical
             # behavior, see the follow-up item this leaves open.
             (0.05, 0.05, 0.036, 0.0110),
-            (0.01, 0.01, MEASURED_VALUE, TOLERANCE),
+            (0.01, 0.01, 0.01, 0.0080),
             # 0.10's expected_rate was originally left as alpha itself,
             # explicitly flagged at the time as unverified, no
             # diagnostic run had actually been done for this

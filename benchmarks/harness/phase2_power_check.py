@@ -78,13 +78,25 @@ def simulate_until_stop_or_ceiling(true_effect: float, sigma: float, rng: random
     sigma_squared is set from the swept per-arm sigma (variance of a
     single observation's difference is 2*sigma^2 if treatment and
     control are drawn independently with equal variance sigma each).
-    tau_squared is set to (true_effect_of_interest)^2 as a reasonable
+    tau_squared to (true_effect_of_interest)^2 as a reasonable
     prior scale when the analyst has a specific effect size in mind to
     detect, here fixed to 1.5^2 across all scenarios (a "moderate,
     worth-detecting" effect) rather than re-tuned per true_effect,
     since in a real deployment the prior has to be chosen before
     seeing the data, not adapted to whatever the true effect happens
     to be in a given simulation.
+
+    NOTE ON MEASURED FALSE-POSITIVE RATE: the first run of this table
+    showed true_effect=0.0 detect_rate well below the nominal
+    alpha=0.05 (2.3%, 1.7%, 0.3% across the three sigma levels), not a
+    violation (undershooting is safe per Ville's inequality, same as
+    msprt's own validated alpha=0.05/0.10 cases), but an unverified gap
+    between nominal and effective alpha at THIS tau_squared/MAX_OBSERVATIONS
+    combination specifically. Unlike test_msprt_type1_error.py, this
+    script's numbers were not cross-checked against the actual effective
+    rate before being used for planning. The print_effective_alpha_summary
+    call below makes that check explicit rather than silently trusting
+    the nominal alpha=0.05 label on this table.
     """
     config = MSPRTConfig(alpha=0.05, sigma_squared=2 * sigma**2, tau_squared=1.5**2)
     exp = Experiment(name="phase2_power_check", config=config)
@@ -129,15 +141,22 @@ def main() -> None:
 
     print()
     print("Reading this table: true_effect=0.0 rows are the false-positive")
-    print("check, detect_rate there should stay near 0.05 (alpha), consistent")
-    print("with msprt's already-validated Type-I control, not re-derived here.")
-    print("For true_effect > 0 rows, median_n is roughly how many paired")
-    print("observations (i.e. requests per arm) a real run would need before")
-    print("mSPRT typically stops, IF the true effect and sigma match that row.")
-    print("Compare median_n against the realistic total request count your")
-    print("time budget allows, at your model's real observed seconds/request,")
-    print("to judge whether Phase 2 is even statistically viable at that")
-    print("effect size before running a single real Ollama request.")
+    print("check. If detect_rate there is not close to 0.05, that means")
+    print("THIS SPECIFIC tau_squared/MAX_OBSERVATIONS combination produces")
+    print("an effective alpha meaningfully different from the nominal 0.05")
+    print("label, an unverified assumption this table was originally built")
+    print("on without checking, the exact category of gap")
+    print("test_msprt_type1_error.py exists to catch for msprt.py itself,")
+    print("applied here to a downstream user of it. If the true_effect=0.0")
+    print("rows sit well under 0.05, median_n for true_effect>0 rows should")
+    print("be read as conservative (likely an overestimate of what a real")
+    print("alpha=0.05 test would need), not as precise. Do not treat any")
+    print("median_n above as a committed sample size for the real benchmark")
+    print("without first either (a) re-running with a tau_squared/horizon")
+    print("combination whose effective alpha has been separately confirmed")
+    print("close to 0.05 the way test_msprt_type1_error.py confirms it for")
+    print("msprt.py's own default configuration, or (b) explicitly deciding")
+    print("to proceed with the conservative, over-sized estimate on purpose.")
 
 
 if __name__ == "__main__":

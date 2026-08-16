@@ -1,13 +1,17 @@
 [project]
-name = "stratum-benchmark-harness"
+name = "stratum-benchmarks-harness"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "httpx>=0.28.1",
-    "numpy>=2.2.6",
-    "pyarrow>=24.0.0",
-    "pyyaml>=6.0.3",
-    "scipy>=1.15.3",
+    "httpx>=0.27",
+    "pyarrow>=17.0",
+    "pyyaml>=6.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["."]

@@ -239,9 +239,34 @@ async def run(run_config: RunConfig, checkpoint_path: Path) -> None:
                 "max_tokens": 50,
             }
 
-            round_robin_task = _timed_request(client, run_config.round_robin_url, body)
-            semantic_task = _timed_request(client, run_config.semantic_url, body)
-            round_robin_latency, semantic_latency = await asyncio.gather(round_robin_task, semantic_task)
+            # SEQUENTIAL, not concurrent, per pair. An earlier version
+            # of this file sent both requests via asyncio.gather
+            # concurrently, on the theory that both workers pointing at
+            # one Ollama instance was fine since the property under
+            # test is routing-strategy benefit, not raw parallelism.
+            # That reasoning missed a real confound: Ollama typically
+            # serves one generation request at a time, so concurrent
+            # requests to it race for its internal queue, and whichever
+            # one loses that race pays an unmeasured queuing delay
+            # folded directly into its "latency" -- visible in the real
+            # pilot run as several pairs with 40-55s diffs, suspiciously
+            # close to PER_REQUEST_TIMEOUT_SECONDS, consistent with one
+            # arm queuing behind the other rather than measuring
+            # genuine inference time. Sequential requests remove this:
+            # each is measured against Ollama's actual current state
+            # with nothing else contending for it at that moment. The
+            # arm order is alternated per pair (see round_robin_first
+            # below) so neither arm systematically goes first, which
+            # would otherwise structurally favor whichever arm is
+            # always measured after Ollama has just "warmed up" from
+            # the other arm's request.
+            round_robin_first = (n_completed + n_skipped) % 2 == 0
+            if round_robin_first:
+                round_robin_latency = await _timed_request(client, run_config.round_robin_url, body)
+                semantic_latency = await _timed_request(client, run_config.semantic_url, body)
+            else:
+                semantic_latency = await _timed_request(client, run_config.semantic_url, body)
+                round_robin_latency = await _timed_request(client, run_config.round_robin_url, body)
 
             if round_robin_latency is None or semantic_latency is None:
                 n_skipped += 1

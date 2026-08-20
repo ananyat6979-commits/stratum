@@ -1,0 +1,18 @@
+{
+  "config": {
+    "alpha": 0.05,
+    "sigma_squared": 915.9199999999998,
+    "tau_squared": 25.0,
+    "max_observations": 2000,
+    "round_robin_url": "http://127.0.0.1:8080/v1/chat/completions",
+    "semantic_url": "http://127.0.0.1:8081/v1/chat/completions",
+    "stream_seed": 20260814
+  },
+  "n_completed_pairs": 485,
+  "n_skipped_pairs": 420,
+  "sum_d": -195.16900000007422,
+  "started_at": "2026-08-17T19:44:51.950264+00:00",
+  "last_updated_at": "2026-08-20T04:54:21.019550+00:00",
+  "should_reject_null": false,
+  "e_value": 0.27579524529401706
+}

@@ -25,3 +25,14 @@ skills.md
 # Git bundle files used as one-time commit-delivery artifacts, not
 # meant to be tracked once their commits are merged into main
 *.bundle
+
+
+
+# Phase 2 diagnostic/pilot mSPRT checkpoints: disposable by design,
+# used once to measure something (offline plumbing verification,
+# real-Ollama variance) then discarded. The one real, ongoing full-run
+# checkpoint (phase2_full_run.json) is deliberately NOT covered by this
+# pattern and is committed as periodic insurance against local disk
+# loss: see the commit that first added it for why.
+benchmarks/harness/phase2_pilot*.json
+benchmarks/harness/phase2_test_*.json

@@ -8,11 +8,11 @@
     "semantic_url": "http://127.0.0.1:8081/v1/chat/completions",
     "stream_seed": 20260814
   },
-  "n_completed_pairs": 489,
-  "n_skipped_pairs": 437,
-  "sum_d": -161.6860000000886,
+  "n_completed_pairs": 831,
+  "n_skipped_pairs": 909,
+  "sum_d": 858.6509999999771,
   "started_at": "2026-08-17T19:44:51.950264+00:00",
-  "last_updated_at": "2026-08-20T06:06:20.404990+00:00",
+  "last_updated_at": "2026-08-23T05:27:58.522004+00:00",
   "should_reject_null": false,
-  "e_value": 0.2712732851722992
+  "e_value": 0.3267768892254815
 }

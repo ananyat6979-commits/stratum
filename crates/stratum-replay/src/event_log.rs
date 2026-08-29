@@ -16,7 +16,7 @@
 //! not declare this dependency. redb has identical operational semantics
 //! with zero C toolchain exposure. See skills.md.
 //!
-//! Keys:   (lamport_ts: u64, event_id: u128) -- redb TableDefinition
+//! Keys:   (lamport_ts: u64, event_id: u128), redb TableDefinition
 //!         Ordered by (lamport_ts ASC, event_id ASC) automatically.
 //! Values: bincode::serialize(&ReplayEvent) as &[u8]
 
@@ -64,6 +64,7 @@ pub enum EventLogError {
     RedbStorage(Box<redb::StorageError>),
     Serialization(String),
     NonMonotonicTimestamp { attempted: u64, last_written: u64 },
+    LogNotFound(String),
 }
 
 impl std::fmt::Display for EventLogError {
@@ -82,6 +83,12 @@ impl std::fmt::Display for EventLogError {
             } => write!(
                 f,
                 "non-monotonic timestamp: attempted {attempted}, last written {last_written}"
+            ),
+            Self::LogNotFound(path) => write!(
+                f,
+                "event log not found at {path} -- refusing to silently create a new, \
+                 empty log; use AppendOnlyEventLog::open() instead if creating a new \
+                 log was actually intended"
             ),
         }
     }
@@ -135,10 +142,55 @@ impl AppendOnlyEventLog {
     ///
     /// Unlike LMDB, redb uses a single file, not a directory.
     /// The parent directory must exist; redb creates the file if absent.
+    ///
+    /// # A real bug this fixed
+    /// Previously called `Database::create()` unconditionally, which
+    /// silently creates a fresh, empty database at `path` if nothing
+    /// exists there yet, redb's own documented behavior for
+    /// `create()`. This meant a caller who intended to open an
+    /// EXISTING log (e.g. `dump_events`, reading a real event log for
+    /// analysis) but passed a slightly wrong relative path got no
+    /// error, just a silently empty result indistinguishable from "this
+    /// log genuinely has zero events." Confirmed as a real, live bug:
+    /// `dump_events --path ..\..\benchmarks\harness\gw_sem_phase2full.redb`
+    /// from `crates/stratum-replay`, run against a real, populated
+    /// event log from an actual 2000-observation benchmark run,
+    /// silently created a brand-new empty file at that path (both
+    /// LastWriteTime and a suspiciously round, identical byte count
+    /// across two unrelated invocations confirmed this directly) and
+    /// reported "0 events" with no error, rather than failing loudly
+    /// on the real, underlying path mismatch. This constructor now
+    /// requires callers to be explicit about which behavior they want.
     pub fn open(
         path: impl AsRef<Path>,
         node_id: impl Into<Arc<str>>,
     ) -> Result<Self, EventLogError> {
+        Self::open_impl(path, node_id, /* create_if_missing */ true)
+    }
+
+    /// Same as [`open`], but returns [`EventLogError::LogNotFound`]
+    /// instead of silently creating a new, empty log if `path` doesn't
+    /// already exist. Use this whenever the caller's intent is to read
+    /// or analyze an EXISTING log, not to start a new one, exactly
+    /// the bug `open`'s doc comment above describes.
+    pub fn open_existing(
+        path: impl AsRef<Path>,
+        node_id: impl Into<Arc<str>>,
+    ) -> Result<Self, EventLogError> {
+        Self::open_impl(path, node_id, /* create_if_missing */ false)
+    }
+
+    fn open_impl(
+        path: impl AsRef<Path>,
+        node_id: impl Into<Arc<str>>,
+        create_if_missing: bool,
+    ) -> Result<Self, EventLogError> {
+        if !create_if_missing && !path.as_ref().exists() {
+            return Err(EventLogError::LogNotFound(
+                path.as_ref().display().to_string(),
+            ));
+        }
+
         let db = Database::create(path.as_ref())?;
 
         // Ensure the table exists
@@ -308,6 +360,46 @@ mod tests {
         assert_eq!(range.len(), 3);
         assert_eq!(range[0].lamport_ts, ts_4);
         assert_eq!(range[2].lamport_ts, ts_6);
+    }
+
+    #[test]
+    fn open_existing_refuses_to_silently_create_a_new_log() {
+        // The exact bug this fix addresses: a genuinely nonexistent
+        // path must error, not silently produce an empty, freshly
+        // created database indistinguishable from "this log has zero
+        // events."
+        let path = temp_log_path();
+        assert!(!path.exists());
+        let result = AppendOnlyEventLog::open_existing(&path, "node-0");
+        assert!(matches!(result, Err(EventLogError::LogNotFound(_))));
+        assert!(!path.exists(), "open_existing must not create a file on failure");
+    }
+
+    #[test]
+    fn open_existing_succeeds_against_a_real_prior_log() {
+        let path = temp_log_path();
+        // First, a real log with real content, via the normal open().
+        {
+            let log = AppendOnlyEventLog::open(&path, "node-0").unwrap();
+            log.append(1, vec![], b"real event".to_vec()).unwrap();
+        }
+        // Then, open_existing must find it and see the real content.
+        let reopened = AppendOnlyEventLog::open_existing(&path, "node-0").unwrap();
+        let events = reopened.load_all().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload, b"real event");
+    }
+
+    #[test]
+    fn open_still_creates_a_new_log_when_that_is_the_actual_intent() {
+        // open() (not open_existing()) must still work exactly as
+        // before for the legitimate case: starting a brand new log.
+        // This fix changes behavior only for open_existing(), not for
+        // open()'s own documented, intentional create-if-missing role.
+        let path = temp_log_path();
+        assert!(!path.exists());
+        let log = AppendOnlyEventLog::open(&path, "node-0").unwrap();
+        assert!(log.is_empty().unwrap());
     }
 
     #[test]

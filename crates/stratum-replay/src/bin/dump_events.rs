@@ -44,51 +44,63 @@ use stratum_replay::event_log::AppendOnlyEventLog;
 /// a Windows terminal (not piped, as causal-observer's Go wrapper
 /// does via os/exec's StdoutPipe) failed with "Windows stdio in
 /// console mode does not support writing non-UTF-8 byte sequences",
-/// Windows enforces UTF-8 validity on console writes in certain modes,
-/// and this binary's whole output is raw binary bincode bytes, never
-/// valid UTF-8 in general. Piped output (causal-observer's actual use
-/// case, and this binary's own stated purpose per its module doc
-/// comment) was never affected, since a real OS pipe isn't a console
-/// handle and doesn't have this restriction, but a standalone
-/// terminal run, exactly what a developer debugging this binary in
-/// isolation would naturally try first, silently failed. Fixed by
-/// explicitly switching stdout to Windows binary mode before writing
-/// any bytes, matching what redirecting output already did implicitly.
+/// Windows enforces UTF-8 validity specifically on writes through
+/// std::io::Stdout's console-mode handling, and this binary's whole
+/// output is raw binary bincode bytes, never valid UTF-8 in general.
+///
+/// FIRST FIX ATTEMPT DID NOT WORK, RECORDED HONESTLY: an earlier
+/// version of this function called the Windows CRT's `_setmode` on
+/// file descriptor 1 to switch it to binary mode, on the reasoning
+/// that this is the standard, documented fix for this class of
+/// Rust-on-Windows issue. Verified directly, by hand, in a real
+/// unredirected terminal, both before and after that fix: the exact
+/// same error fired both times. Most likely cause: `_setmode` patches
+/// the C runtime's file descriptor table, but `std::io::Stdout`'s
+/// writes may not consistently route through that same descriptor by
+/// the time the UTF-8 check fires, especially when a `cargo run`
+/// wrapper process is involved. Rather than guess at a second
+/// mode-flag-based fix and risk the same false confidence, this
+/// version bypasses `std::io::Stdout` for the actual byte writes
+/// entirely and writes directly to the raw OS file handle via
+/// `std::os::windows::io::FromRawHandle`, which has no console-mode
+/// UTF-8 validation layer, that validation is specific to
+/// `Stdout`'s console-aware writer, not a property of the underlying
+/// handle. `GetStdHandle(STD_OUTPUT_HANDLE)` retrieves the same
+/// handle `std::io::stdout()` would have used; wrapping it directly
+/// with `std::fs::File::from_raw_handle` and writing through that
+/// skips the layer that was rejecting non-UTF-8 bytes.
 #[cfg(windows)]
-fn ensure_binary_stdout() {
-    use std::os::windows::io::AsRawHandle;
-    // Setting the console mode's binary flag via the Windows CRT's
-    // _setmode is the standard, documented fix for this exact
-    // Rust-on-Windows issue. std::io::stdout() doesn't expose this
-    // directly, so this uses the raw file descriptor via libc-style
-    // interop already available through the standard library's
-    // Windows-specific handle access, no new dependency required.
-    let _ = std::io::stdout().as_raw_handle();
-    // SAFETY: _setmode with a valid stdout file descriptor (1) and
-    // O_BINARY is a well-defined, standard operation on Windows,
-    // documented by Microsoft's CRT, used specifically to disable
-    // text-mode translation (including the UTF-8 console
-    // restriction) on a stream. This is called once, at startup,
-    // before any writes to stdout.
-    #[link(name = "msvcrt")]
-    extern "C" {
-        fn _setmode(fd: i32, mode: i32) -> i32;
+fn raw_stdout_writer() -> Box<dyn Write> {
+    use std::fs::File;
+    use std::os::windows::io::FromRawHandle;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(nStdHandle: i32) -> *mut std::ffi::c_void;
     }
-    const O_BINARY: i32 = 0x8000;
-    unsafe {
-        _setmode(1, O_BINARY);
-    }
+    const STD_OUTPUT_HANDLE: i32 = -11;
+
+    // SAFETY: GetStdHandle(STD_OUTPUT_HANDLE) is a well-defined
+    // Windows API call returning the process's standard output
+    // handle, documented to be valid for the lifetime of the process
+    // unless explicitly closed or redirected, neither of which this
+    // short-lived CLI does. Wrapping it in a File via
+    // from_raw_handle is safe as long as this process doesn't also
+    // hold and use std::io::stdout() concurrently for byte writes
+    // (it doesn't, see main(), all data writes go through this
+    // writer, only the human-readable progress line uses eprintln!,
+    // a separate stream, stderr).
+    let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+    let file = unsafe { File::from_raw_handle(handle as *mut _) };
+    Box::new(file)
 }
 
 #[cfg(not(windows))]
-fn ensure_binary_stdout() {
-    // No-op: this restriction is Windows-console-specific. Unix
-    // terminals don't validate stdout as UTF-8.
+fn raw_stdout_writer() -> Box<dyn Write> {
+    Box::new(std::io::stdout())
 }
 
 fn main() {
-    ensure_binary_stdout();
-
     let path = std::env::args()
         .skip_while(|a| a != "--path")
         .nth(1)
@@ -109,8 +121,7 @@ fn main() {
 
     eprintln!("dump_events: writing {} events from {path}", events.len());
 
-    let stdout = std::io::stdout();
-    let mut writer = std::io::BufWriter::new(stdout.lock());
+    let mut writer = std::io::BufWriter::new(raw_stdout_writer());
 
     for event in &events {
         let bytes = bincode::serialize(event).unwrap_or_else(|e| {

@@ -40,7 +40,55 @@ use std::io::Write;
 
 use stratum_replay::event_log::AppendOnlyEventLog;
 
+/// Real bug found while verifying this binary: running it directly in
+/// a Windows terminal (not piped, as causal-observer's Go wrapper
+/// does via os/exec's StdoutPipe) failed with "Windows stdio in
+/// console mode does not support writing non-UTF-8 byte sequences",
+/// Windows enforces UTF-8 validity on console writes in certain modes,
+/// and this binary's whole output is raw binary bincode bytes, never
+/// valid UTF-8 in general. Piped output (causal-observer's actual use
+/// case, and this binary's own stated purpose per its module doc
+/// comment) was never affected, since a real OS pipe isn't a console
+/// handle and doesn't have this restriction, but a standalone
+/// terminal run, exactly what a developer debugging this binary in
+/// isolation would naturally try first, silently failed. Fixed by
+/// explicitly switching stdout to Windows binary mode before writing
+/// any bytes, matching what redirecting output already did implicitly.
+#[cfg(windows)]
+fn ensure_binary_stdout() {
+    use std::os::windows::io::AsRawHandle;
+    // Setting the console mode's binary flag via the Windows CRT's
+    // _setmode is the standard, documented fix for this exact
+    // Rust-on-Windows issue. std::io::stdout() doesn't expose this
+    // directly, so this uses the raw file descriptor via libc-style
+    // interop already available through the standard library's
+    // Windows-specific handle access, no new dependency required.
+    let _ = std::io::stdout().as_raw_handle();
+    // SAFETY: _setmode with a valid stdout file descriptor (1) and
+    // O_BINARY is a well-defined, standard operation on Windows,
+    // documented by Microsoft's CRT, used specifically to disable
+    // text-mode translation (including the UTF-8 console
+    // restriction) on a stream. This is called once, at startup,
+    // before any writes to stdout.
+    #[link(name = "msvcrt")]
+    extern "C" {
+        fn _setmode(fd: i32, mode: i32) -> i32;
+    }
+    const O_BINARY: i32 = 0x8000;
+    unsafe {
+        _setmode(1, O_BINARY);
+    }
+}
+
+#[cfg(not(windows))]
+fn ensure_binary_stdout() {
+    // No-op: this restriction is Windows-console-specific. Unix
+    // terminals don't validate stdout as UTF-8.
+}
+
 fn main() {
+    ensure_binary_stdout();
+
     let path = std::env::args()
         .skip_while(|a| a != "--path")
         .nth(1)

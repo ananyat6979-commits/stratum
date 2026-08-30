@@ -28,6 +28,7 @@ removal list and reasoning.
 
 | `experiment-engine`: mSPRT core | `MSPRTConfig`/`MSPRTState`, the closed-form mixture-prior sequential test (Johari/Pekelis/Walsh 2015, Robbins 1970). O(1) per-observation update. Type-I error control (Ville's inequality) empirically confirmed via Monte Carlo, not just formula-verified: three alpha levels plus one alternate tau, each checked against both the proven Ville ceiling (hard, non-negotiable) and a directly measured asymptotic rate (soft, informational). All three alpha levels' expected rates are now directly measured, not assumed: alpha=0.05 -> 0.036, alpha=0.10 -> 0.0696, alpha=0.01 -> 0.009. All three initially shipped as unverified placeholders equal to alpha itself; two were wrong on first honest measurement and caught by the test itself, not assumed correct. The tau=4.0 case still checks only the hard Ville ceiling, no direct rate measurement exists for that configuration. | 25 tests, ~16 minutes full run (5000-simulation Monte Carlo per configuration, this is real computational cost, not a fast unit-test suite, run deliberately, not on every casual change) |
 | `experiment-engine`: AIPW estimator | `estimate_ate()`, augmented inverse propensity weighting for the average treatment effect (Robins/Rotnitzky/Zhao 1994). The actual "doubly robust" claim, unbiased when either the propensity model or the outcome model is misspecified, not just when both are correct, empirically confirmed via Monte Carlo across both misspecification scenarios independently, plus a bias-detection sanity check confirming the test suite has real power to catch a violation. Both misspecification scenarios passed on the first honest measurement, no tolerance adjustment needed. | 13 tests (9 in test_estimator.py: 3 validation, 3 formula, 3 standard-error, all written in the same original commit, none pre-existing; 4 Monte Carlo double-robustness tests). Combined experiment-engine suite: 55 tests total (25 mSPRT + 17 Experiment + 13 estimator), independently re-collected and confirmed via `pytest --collect-only` against a fresh checkout, not carried forward from an earlier miscount. |
+| `causal-observer` (Go) | Path A of a two-part plan (see the RFC-001 gap note below): reads a real STRATUM event log via `dump_events` (a Rust CLI shelling out to the existing, tested `AppendOnlyEventLog::open_existing`/`load_all`) and a hand-written Go bincode decoder (no third-party library, verified field-by-field against the real `ReplayEvent` and `RoutingDecisionPayload` Rust structs), reporting real routing-decision counts by worker and by strategy. Verified against real, hard-won Phase 2 data: `gw_sem_phase2full.redb` (3948 events, worker-0=1435/worker-1=2513, a real, visible 2:1 skew from SemanticRouter's cache-hit-aware selection) and `gw_rr_phase2full.redb` (4105 events, worker-0=2055/worker-1=2050, the near-even split expected of pure round-robin). Zero decode failures across 8053 total real events. | 6 Go unit tests (bincode decoder, checked against hand-built bytes independent of the decoder's own logic) + 3 new Rust tests (`open_existing`'s refusal/success paths). A real Windows-only bug was found and fixed while verifying this against real data: `dump_events` failed when run standalone (not piped) due to Windows console UTF-8 enforcement on binary output; the actual causal-observer use case (piped via Go's `os/exec`) was never affected. |
 
 ## A precise correction: what "replay" means here
 
@@ -48,6 +49,22 @@ worth being exact about the difference, because the harder version is
 one of this project's most-cited pieces of intended signal. If it's
 ever built, it belongs in these same three files, for real.
 
+
+**A related gap, found while building `causal-observer`**: RFC-001
+(`docs/rfc/RFC-001-causal-observability.md`) describes a
+`CausalDecisionEvent` proto with a full `OracleStateSnapshot`, bandit
+weights, and complete request-lifecycle events. What actually exists
+and is actually written to the event log is `stratum-router`'s much
+smaller `RoutingDecisionPayload` (`replay_key`, `selected_worker_id`,
+`routing_score`, `strategy_name`, `reason`): real, and confirmed
+working end-to-end against 8053 real production events (see
+`causal-observer`'s row above), but a smaller claim than RFC-001's
+original design. Extending `RoutingDecisionPayload` with a real oracle
+state snapshot, closing more of this gap, is a legitimate next piece
+of work, not done here, and `causal-observer` was built to keep
+working unchanged once it lands, since it decodes payload fields it
+recognizes and skips anything it doesn't.
+
 ## Deferred, not started
 
 | Component | Status | Why |
@@ -55,7 +72,6 @@ ever built, it belongs in these same three files, for real.
 | `stratum-raft` | Empty crate (`Cargo.toml` + doc-comment-only `lib.rs`) | Not started. Config-plane consensus is real, useful work, but lower priority than finishing what's already 80% wired (see Next below). |
 | `stratum-scheduler` | Empty crate | **Structurally blocked**, not just "not yet started": the design (NUMA-aware, predicted-length scheduling) requires backend-internal scheduling hooks (a forkable scheduler, block-table access) that this project's actual inference backend, Ollama, does not expose. This phase needs either a backend change (e.g. a real vLLM deployment) or a redesign around what Ollama can actually offer, before implementation makes sense. |
 | `stratum-chaos` | Empty crate | Not started. A reduced taxonomy (process-kill, partition simulation) is achievable against Ollama; the original design's backend-internal fault modes (KV eviction storm, attention OOM) are not, for the same reason as the scheduler. |
-| `causal-observer` (Go) | `cmd/observer/main.go` only, proves the Go toolchain builds, nothing else | Not started. |
 | `eval-fabric`, `reliability-model`, `synthgen` (Python) | `pyproject.toml` only, zero implementation files | Not started. No `cusum.py`, `survival.py` exist. Any prior document citing these paths at a specific proficiency level was describing planned work, not completed work. |
 | Custom Raft, mSPRT sequential testing, doubly-robust causal estimation, synthetic data generation, NUMA-aware scheduling | Not started | Real, well-specified ideas in the original design blueprint. None require the backend-choice resolution above except scheduling/chaos, so these are legitimate next-phase candidates once the wiring below is finished. |
 
@@ -169,7 +185,7 @@ truncated to 15-18 successful requests out of 49 before the crash),
 excluded from the clean-run analysis above for that reason, not
 retracted.
 
-## Phase 2: SemanticRouter routing-quality benchmark — complete, honest null result
+## Phase 2: SemanticRouter routing-quality benchmark, complete, honest null result
 
 **Status: complete.** A live, checkpointed, resumable mSPRT sequential
 test comparing SemanticRouter against RoundRobinRouter under real
@@ -182,12 +198,12 @@ full, checkpoint-by-checkpoint record.
 
 **Result**: reached `max_observations` (2000) without mSPRT rejecting
 the null hypothesis. Final `e_value = 0.160`, against a rejection
-threshold of `20.0` (`alpha = 0.05`) — not close at any point in the
+threshold of `20.0` (`alpha = 0.05`), not close at any point in the
 run's second half, and the trajectory oscillated within a bounded
 band for the majority of the run rather than trending toward
 rejection. `mean_difference` (semantic minus round_robin, seconds)
 settled at approximately `-0.41s` across all 2000 paired observations
-— semantic marginally faster on average, but the effect (if it is one
+, semantic marginally faster on average, but the effect (if it is one
 at all, rather than residual noise) is roughly 50x smaller than the
 per-arm noise this test was calibrated against (`sigma ≈ 21.4s`,
 measured directly from a real pilot run, not assumed).
@@ -199,7 +215,7 @@ rationale), and on this hardware, there is no statistically detectable
 end-to-end latency benefit from SemanticRouter's cache-hit-aware
 routing over simple round-robin. This is a real, negative finding
 about the mechanism's practical impact under these specific
-conditions — not a claim that the mechanism is broken (Phase 1 already
+conditions, not a claim that the mechanism is broken (Phase 1 already
 confirmed SemanticRouter's routing overhead is real but small, and
 `stratum-router`'s own 84 tests confirm the cache-hit index and
 scoring logic work correctly in isolation), and not a claim that a
@@ -212,7 +228,7 @@ is severe and already independently documented elsewhere in this
 project (2.8s-337s for an identical prompt, see `skills.md` and
 `benchmarks/README.md`). A cache-hit locality benefit, if real, would
 plausibly show up as a modest fraction of total inference time saved
-on repeat-prompt requests specifically — an effect on the order of
+on repeat-prompt requests specifically, an effect on the order of
 single-digit seconds is entirely plausible as a true value, and is
 exactly the scale this run's own measured `mean_difference` (-0.41s)
 sits at. But an effect that size is roughly 50x smaller than this
@@ -223,7 +239,7 @@ quieter measurement environment.
 
 **Operational finding, distinct from the routing-quality question**:
 of 4088 total real request-pairs attempted, 2088 (~51%) were skipped
-due to non-200 dispatch failures — every single one a `502` from
+due to non-200 dispatch failures, every single one a `502` from
 Ollama itself, never a timeout (`PER_REQUEST_TIMEOUT_SECONDS=180` was
 never the binding constraint). This is a real, separate, and
 significant finding about running a single local Ollama instance
@@ -260,7 +276,7 @@ time they occurred, not retroactively cleaned up.
 
 **Statistical design note**: this experiment used a sequential test
 (mSPRT) specifically because the true effect size and this
-environment's real variance were both unknown in advance — see
+environment's real variance were both unknown in advance: see
 `phase2_power_check.py` for the pre-registered power analysis that
 motivated this choice over a fixed-sample-size design, and its own
 documented finding that this configuration's tolerance bands needed

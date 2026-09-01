@@ -36,3 +36,8 @@ skills.md
 # loss: see the commit that first added it for why.
 benchmarks/harness/phase2_pilot*.json
 benchmarks/harness/phase2_test_*.json
+
+
+# Raw dump_events output redirected to a file for ad hoc inspection:
+# disposable, same category as Phase 2's pilot/test checkpoints
+*_events.bin

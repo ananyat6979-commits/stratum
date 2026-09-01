@@ -88,6 +88,12 @@ impl MockSignalsProvider {
     pub fn warmed(signals: RoutingSignals) -> Self {
         Self::new(signals, MIN_ORACLE_PULLS + 1)
     }
+
+    /// Unwarmed oracle: below the trust threshold, forces callers onto the
+    /// pre-warmup fallback path rather than score-based routing.
+    pub fn unwarmed() -> Self {
+        Self::new(RoutingSignals::neutral(), MIN_ORACLE_PULLS - 1)
+    }
 }
 
 impl WorkerSignalsProvider for MockSignalsProvider {
@@ -289,11 +295,17 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
         // Try affinity routing first
         if let Some(session) = session_id {
             if let Some(worker) = self.try_affinity_route(session, &routable, &oracle_signals) {
-                return Ok(RoutingDecision {
-                    score: 1.0,
-                    reason: format!("affinity:{session}"),
-                    worker,
-                });
+                                  return Ok(RoutingDecision {
+                      score: 1.0,
+                      reason: format!("affinity:{session}"),
+                      worker,
+                      // Affinity routing bypasses oracle scoring
+                      // entirely, it pins to a session's prior
+                      // worker regardless of current signals.
+                      // Attaching a snapshot here would claim oracle
+                      // data drove this decision, when it didn't.
+                      oracle_snapshot: None,
+                  });
             }
         }
 
@@ -314,10 +326,15 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
                 .fallback_counter
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize
                 % routable.len();
-            return Ok(RoutingDecision {
-                score: 1.0,
-                reason: "fallback:round_robin_pre_warmup".to_string(),
-                worker: routable[idx].clone(),
+              return Ok(RoutingDecision {
+                  score: 1.0,
+                  reason: "fallback:round_robin_pre_warmup".to_string(),
+                  worker: routable[idx].clone(),
+                  // Pre-warmup fallback exists precisely because no
+                  // worker's oracle signals are trustworthy yet,
+                  // attaching a snapshot would misrepresent this as a
+                  // real, scored decision.
+                  oracle_snapshot: None,
             });
         }
 
@@ -356,10 +373,26 @@ impl<P: WorkerSignalsProvider> RouterStrategy for SemanticRouter<P> {
             crate::scoring::compute_score(&signals_vec[best_idx], &weights, max_latency)
         };
 
-        Ok(RoutingDecision {
-            score,
-            reason: format!("semantic:score={score:.3}"),
-            worker,
+          Ok(RoutingDecision {
+              score,
+              reason: format!("semantic:score={score:.3}"),
+              worker,
+              oracle_snapshot: Some(crate::router::OracleSnapshot {
+                  // From signals_vec[best_idx], the LOCALLY-CORRECTED
+                  // signals actually used above in compute_score,
+                  // not oracle_signals[best_idx].signals directly,
+                  // which still holds the wire-sourced cache_hit_prob
+                  // placeholder this router deliberately overwrites
+                  // before scoring (see this function's own comment
+                  // above signals_vec's construction). Recording the
+                  // raw wire value here would misrepresent what this
+                  // decision actually weighed.
+                  cache_hit_prob: signals_vec[best_idx].cache_hit_prob,
+                  predicted_latency_ms: signals_vec[best_idx].predicted_latency_ms,
+                  sla_affinity: signals_vec[best_idx].sla_affinity,
+                  kv_pressure: signals_vec[best_idx].kv_pressure,
+                  n_observations: oracle_signals[best_idx].n_observations,
+              }),
         })
     }
 
@@ -415,6 +448,46 @@ mod tests {
         let decision = router.route("key", "test prompt", &workers).unwrap();
         assert_eq!(decision.worker.worker_id, "worker-0");
         assert_eq!(router.strategy_name(), "semantic");
+    }
+
+        #[test]
+    fn scored_path_produces_a_real_oracle_snapshot() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let bp = Arc::new(BackpressureController::with_defaults());
+        let router = SemanticRouter::new(
+            registry,
+            Arc::new(MockSignalsProvider::warmed(RoutingSignals::neutral())),
+            bp,
+        );
+        let workers = test_workers(2);
+
+        let decision = router.route("key", "some prompt", &workers).unwrap();
+
+        assert!(
+            decision.oracle_snapshot.is_some(),
+            "the real, scored routing path must attach a real oracle snapshot, \
+             reason was: {}",
+            decision.reason
+        );
+    }
+
+    #[test]
+    fn pre_warmup_fallback_has_no_oracle_snapshot() {
+        let registry = Arc::new(WorkerRegistry::new());
+        let bp = Arc::new(BackpressureController::with_defaults());
+        // Unwarmed: n_observations below MIN_ORACLE_PULLS, forces the
+        // pre-warmup fallback path, not real scoring.
+        let router = SemanticRouter::new(
+            registry,
+            Arc::new(MockSignalsProvider::unwarmed()),
+            bp,
+        );
+        let workers = test_workers(2);
+
+        let decision = router.route("key", "some prompt", &workers).unwrap();
+
+        assert_eq!(decision.reason, "fallback:round_robin_pre_warmup");
+        assert!(decision.oracle_snapshot.is_none());
     }
 
     #[test]

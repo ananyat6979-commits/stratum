@@ -101,11 +101,16 @@ fn raw_stdout_writer() -> Box<dyn Write> {
 }
 
 fn main() {
-    let path = std::env::args()
-        .skip_while(|a| a != "--path")
+    let args: Vec<String> = std::env::args().collect();
+    let stats_only = args.iter().any(|a| a == "--stats-only");
+
+    let path = args
+        .iter()
+        .skip_while(|a| a.as_str() != "--path")
         .nth(1)
+        .cloned()
         .unwrap_or_else(|| {
-            eprintln!("usage: dump_events --path <event_log.redb>");
+            eprintln!("usage: dump_events --path <event_log.redb> [--stats-only]");
             std::process::exit(2);
         });
 
@@ -118,6 +123,25 @@ fn main() {
         eprintln!("failed to read events from {path}: {e}");
         std::process::exit(1);
     });
+
+    if stats_only {
+        // Added specifically to answer a real scoping question (does
+        // Phase 2's pre-oracle-snapshot event data justify building
+        // cross-language bincode compatibility, or is it small/stale
+        // enough that documenting the break is the more honest choice)
+        // with a real count and date range instead of a proxy
+        // (file LastWriteTime) or an assumption. See docs/SCOPE.md for
+        // the decision this fed into.
+        if events.is_empty() {
+            println!("0 events in {path}");
+            return;
+        }
+        let min_ts = events.iter().map(|e| e.lamport_ts).min().unwrap();
+        let max_ts = events.iter().map(|e| e.lamport_ts).max().unwrap();
+        println!("{} events in {path}", events.len());
+        println!("lamport_ts range: {min_ts} .. {max_ts}");
+        return;
+    }
 
     eprintln!("dump_events: writing {} events from {path}", events.len());
 

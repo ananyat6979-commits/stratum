@@ -46,6 +46,49 @@ impl WorkerSpec {
     }
 }
 
+/// Snapshot of the oracle signals actually used to select a worker,
+/// captured inside route() at the moment of selection.
+///
+/// # Why this is captured here, not recomputed after route() returns
+/// SemanticRouter's per-call signal computation (see semantic_router.rs's
+/// route(), specifically the local, synchronous overwrite of
+/// cache_hit_prob) is transient: nothing about it is stored on `self`
+/// after route() returns. A caller trying to reconstruct "what signals
+/// led to this decision" after the fact would either have to re-fetch
+/// oracle state (which may have changed) or guess, both wrong. This
+/// struct exists specifically so the real, exact values used ARE the
+/// values recorded, captured at the only point they're actually in
+/// scope.
+///
+/// # Why this is Option<T> on RoutingDecision, not a required field
+/// RoundRobinRouter has no oracle signals at all, None here is an
+/// honest absence, not a fabricated neutral() value standing in for
+/// "no data." SemanticRouter's own affinity-routing and pre-warmup
+/// fallback paths (see semantic_router.rs's route()) also correctly
+/// return None: both explicitly bypass score-based oracle selection,
+/// so attaching a snapshot to either would misrepresent what actually
+/// drove the decision. Only the real, scored path populates this.
+#[derive(Debug, Clone)]
+pub struct OracleSnapshot {
+    /// See scoring::RoutingSignals::cache_hit_prob. This is the
+    /// LOCALLY-COMPUTED value SemanticRouter actually used, not the
+    /// (permanently placeholder, always-0.0) wire value from the
+    /// cache-oracle HTTP response, see semantic_router.rs's route()
+    /// for the explicit overwrite this reflects.
+    pub cache_hit_prob: f64,
+    /// See scoring::RoutingSignals::predicted_latency_ms.
+    pub predicted_latency_ms: f64,
+    /// See scoring::RoutingSignals::sla_affinity.
+    pub sla_affinity: f64,
+    /// See scoring::RoutingSignals::kv_pressure.
+    pub kv_pressure: f64,
+    /// See WorkerOracleSignals::n_observations. How many real
+    /// observations backed the signals above, distinct from the
+    /// four scoring fields, this lives one level up on
+    /// WorkerOracleSignals, not on RoutingSignals itself.
+    pub n_observations: u64,
+}
+
 /// The result of a routing decision.
 #[derive(Debug, Clone)]
 pub struct RoutingDecision {
@@ -58,6 +101,10 @@ pub struct RoutingDecision {
     /// Human-readable description of why this worker was chosen.
     /// Used in telemetry and replay debugging.
     pub reason: String,
+    /// The oracle signals actually used to reach this decision, if
+    /// any. See OracleSnapshot's own doc comment for exactly when
+    /// this is Some vs None.
+    pub oracle_snapshot: Option<OracleSnapshot>,
 }
 
 /// Errors that can occur during routing.
@@ -125,7 +172,7 @@ pub trait RouterStrategy: Send + Sync + 'static {
     /// state. This exists on the trait, rather than requiring a caller to
     /// downcast `dyn RouterStrategy` to a concrete type, specifically so
     /// `AppState` can hold `Arc<dyn RouterStrategy>` and call this
-    /// uniformly regardless of which strategy is active -- see
+    /// uniformly regardless of which strategy is active, see
     /// `stratum-gateway`'s `handle_chat_completions`, which calls this
     /// exactly once, after dispatch succeeds, never from inside route().
     fn record_outcome(&self, _worker_id: &str, _prompt: &str) {}
@@ -181,6 +228,7 @@ impl RouterStrategy for RoundRobinRouter {
             score: 1.0,
             reason: format!("round-robin index {index}"),
             worker,
+            oracle_snapshot: None, // RoundRobinRouter has no oracle signals
         })
     }
 
@@ -218,6 +266,11 @@ pub fn route_and_log(
         routing_score: decision.score,
         strategy_name: strategy.strategy_name().to_string(),
         reason: decision.reason.clone(),
+        oracle_cache_hit_prob: decision.oracle_snapshot.as_ref().map(|s| s.cache_hit_prob),
+        oracle_predicted_latency_ms: decision.oracle_snapshot.as_ref().map(|s| s.predicted_latency_ms),
+        oracle_sla_affinity: decision.oracle_snapshot.as_ref().map(|s| s.sla_affinity),
+        oracle_kv_pressure: decision.oracle_snapshot.as_ref().map(|s| s.kv_pressure),
+        oracle_n_observations: decision.oracle_snapshot.as_ref().map(|s| s.n_observations),
     };
 
     let payload_bytes =
@@ -232,7 +285,18 @@ pub fn route_and_log(
 }
 
 /// The payload written to the event log for each routing decision.
-/// Intentionally minimal for Phase 2, oracle state snapshot added Phase 3.
+///
+/// The five `oracle_*` fields were added when SemanticRouter's real
+/// oracle signals (see OracleSnapshot) became worth recording, all
+/// five are None together for RoundRobinRouter decisions and
+/// SemanticRouter's affinity/pre-warmup-fallback paths (see
+/// RoutingDecision::oracle_snapshot's doc comment), Some together only
+/// for the real, scored SemanticRouter path. This closes part of the
+/// gap to RFC-001's original CausalDecisionEvent design (see
+/// docs/SCOPE.md's "A related gap" note), still smaller than that
+/// design's full OracleStateSnapshot (this records only the winning
+/// worker's signals, not every candidate's), a deliberate, stated
+/// scope choice, not an oversight.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct RoutingDecisionPayload {
     pub replay_key: String,
@@ -240,6 +304,11 @@ pub struct RoutingDecisionPayload {
     pub routing_score: f64,
     pub strategy_name: String,
     pub reason: String,
+    pub oracle_cache_hit_prob: Option<f64>,
+    pub oracle_predicted_latency_ms: Option<f64>,
+    pub oracle_sla_affinity: Option<f64>,
+    pub oracle_kv_pressure: Option<f64>,
+    pub oracle_n_observations: Option<u64>,
 }
 
 #[cfg(test)]
@@ -354,5 +423,29 @@ mod tests {
         assert_eq!(payload.replay_key, "test-key");
         assert_eq!(payload.strategy_name, "round_robin");
         assert!(payload.routing_score > 0.0);
+    }
+
+        #[test]
+    fn round_robin_decisions_have_no_oracle_snapshot() {
+        let log_path = std::env::temp_dir().join(format!(
+            "stratum-router-oracle-test-{}.redb",
+            uuid::Uuid::new_v4()
+        ));
+
+        let log = AppendOnlyEventLog::open(&log_path, "node-0").unwrap();
+        let router = RoundRobinRouter::new();
+        let workers = test_workers(2);
+
+        let (decision, event) =
+            route_and_log(&router, "test-key", "test prompt", 0u128, &workers, &log).unwrap();
+
+        assert!(decision.oracle_snapshot.is_none());
+
+        let payload: RoutingDecisionPayload = bincode::deserialize(&event.payload).unwrap();
+        assert!(payload.oracle_cache_hit_prob.is_none());
+        assert!(payload.oracle_predicted_latency_ms.is_none());
+        assert!(payload.oracle_sla_affinity.is_none());
+        assert!(payload.oracle_kv_pressure.is_none());
+        assert!(payload.oracle_n_observations.is_none());
     }
 }

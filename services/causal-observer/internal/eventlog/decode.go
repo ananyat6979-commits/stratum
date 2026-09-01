@@ -103,9 +103,34 @@ func (br *byteReader) readU128() [16]byte {
 	return buf
 }
 
+// maxReasonableFieldBytes bounds any single length-prefixed field this
+// decoder will attempt to allocate for. Found necessary directly, not
+// theoretically: a schema mismatch between this decoder and the real
+// event log it was reading against (see RoutingDecisionPayload's
+// oracle-snapshot extension) produced exactly this failure mode,
+// reading a length prefix at the wrong byte offset, in the wrong
+// field, yields a garbage uint64 that could be enormous. Without this
+// cap, make([]byte, length) would attempt to allocate that much
+// memory and likely panic (OOM) rather than return a clean decode
+// error, a crash for the whole process over one malformed event,
+// not the "skip this event, keep going" behavior the rest of this
+// package is designed around. 64MB is far larger than any real field
+// this decoder handles (prompts, worker IDs, reason strings), while
+// still catching genuinely corrupted/misaligned reads.
+const maxReasonableFieldBytes = 64 * 1024 * 1024
+
 func (br *byteReader) readBytes() []byte {
 	length := br.readU64()
 	if br.err != nil {
+		return nil
+	}
+	if length > maxReasonableFieldBytes {
+		br.err = fmt.Errorf(
+			"refusing to allocate %d bytes for a length-prefixed field "+
+				"(max %d) : almost certainly a schema mismatch or "+
+				"corrupted read, not a real field this large",
+			length, maxReasonableFieldBytes,
+		)
 		return nil
 	}
 	buf := make([]byte, length)
@@ -169,12 +194,92 @@ func DecodeReplayEvent(r io.Reader) (ReplayEvent, error) {
 // fail on payloads from a different, not-yet-supported event kind,
 // and treat that as "skip this event," not a fatal error for the
 // whole log.
+// RoutingDecisionPayload mirrors crates/stratum-router/src/router.rs's
+// RoutingDecisionPayload struct EXACTLY, including field order,
+// verified against the real source before writing this. The five
+// Oracle* fields are new: bincode encodes Option<T> as a single tag
+// byte (0x00 = None, 0x01 = Some, followed by T's bytes if Some),
+// see readOptionalF64/readOptionalU64 below for the matching decode.
+//
+//	pub struct RoutingDecisionPayload {
+//	    pub replay_key: String,
+//	    pub selected_worker_id: String,
+//	    pub routing_score: f64,
+//	    pub strategy_name: String,
+//	    pub reason: String,
+//	    pub oracle_cache_hit_prob: Option<f64>,
+//	    pub oracle_predicted_latency_ms: Option<f64>,
+//	    pub oracle_sla_affinity: Option<f64>,
+//	    pub oracle_kv_pressure: Option<f64>,
+//	    pub oracle_n_observations: Option<u64>,
+//	}
 type RoutingDecisionPayload struct {
-	ReplayKey        string
-	SelectedWorkerID string
-	RoutingScore     float64
-	StrategyName     string
-	Reason           string
+	ReplayKey                string
+	SelectedWorkerID         string
+	RoutingScore             float64
+	StrategyName             string
+	Reason                   string
+	OracleCacheHitProb       *float64
+	OraclePredictedLatencyMs *float64
+	OracleSLAAffinity        *float64
+	OracleKVPressure         *float64
+	OracleNObservations      *uint64
+}
+
+// HasOracleSnapshot reports whether all five oracle fields are
+// present, matching Rust's construction (see router.rs's route_and_log:
+// all five come from the same Option<OracleSnapshot>, so they are
+// always all-Some or all-None together, never a partial mix).
+func (p RoutingDecisionPayload) HasOracleSnapshot() bool {
+	return p.OracleCacheHitProb != nil
+}
+
+func (br *byteReader) readOptionTag() bool {
+	if br.err != nil {
+		return false
+	}
+	var tag [1]byte
+	_, err := io.ReadFull(br.r, tag[:])
+	if err != nil {
+		br.err = fmt.Errorf("reading Option<T> tag byte: %w", err)
+		return false
+	}
+	if tag[0] != 0 && tag[0] != 1 {
+		br.err = fmt.Errorf("invalid Option<T> tag byte: %d (expected 0 or 1)", tag[0])
+		return false
+	}
+	return tag[0] == 1
+}
+
+func (br *byteReader) readOptionalF64() *float64 {
+	if br.err != nil {
+		return nil
+	}
+	if !br.readOptionTag() {
+		return nil // None, or an error already recorded by readOptionTag
+	}
+	var buf [8]byte
+	_, err := io.ReadFull(br.r, buf[:])
+	if err != nil {
+		br.err = fmt.Errorf("reading Option<f64> inner value: %w", err)
+		return nil
+	}
+	v := decodeFloat64(buf)
+	return &v
+}
+
+func (br *byteReader) readOptionalU64() *uint64 {
+	if br.err != nil {
+		return nil
+	}
+	if !br.readOptionTag() {
+		return nil
+	}
+	v := br.readU64()
+	if br.err != nil {
+		return nil
+	}
+	return &v
 }
 
 func DecodeRoutingDecisionPayload(payload []byte) (RoutingDecisionPayload, error) {
@@ -196,6 +301,12 @@ func DecodeRoutingDecisionPayload(payload []byte) (RoutingDecisionPayload, error
 
 	p.StrategyName = br.readString()
 	p.Reason = br.readString()
+
+	p.OracleCacheHitProb = br.readOptionalF64()
+	p.OraclePredictedLatencyMs = br.readOptionalF64()
+	p.OracleSLAAffinity = br.readOptionalF64()
+	p.OracleKVPressure = br.readOptionalF64()
+	p.OracleNObservations = br.readOptionalU64()
 
 	if br.err != nil {
 		return RoutingDecisionPayload{}, br.err

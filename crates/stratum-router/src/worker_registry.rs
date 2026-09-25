@@ -17,7 +17,7 @@
 //! - Implicit signals from routing outcomes (consecutive timeouts → Degraded)
 //!
 //! Phase 3 implements explicit health checking. For now, all registered
-//! workers are assumed Healthy — the router trusts the operator to
+//! workers are assumed Healthy. the router trusts the operator to
 //! deregister workers that are actually down.
 
 use std::collections::HashMap;
@@ -79,13 +79,26 @@ impl WorkerEntry {
         }
     }
 
-    /// Record a successful routing outcome. Resets failure counter.
-    /// Transitions Degraded → Healthy after a success.
+    /// Record a successful routing outcome. Resets failure counter and
+    /// unconditionally refreshes last_health_update. Transitions
+    /// Degraded → Healthy after a success.
+    ///
+    /// # A real bug this fixed
+    /// Previously only refreshed last_health_update inside the
+    /// `if self.health == WorkerHealth::Degraded` branch. A worker
+    /// that stayed Healthy continuously, receiving a steady stream of
+    /// real successes and never degrading, never had its timestamp
+    /// touched past construction time. mark_stale_unavailable's own
+    /// doc comment says it marks workers that have "not had a
+    /// successful routing outcome within timeout". that was not
+    /// what the code actually checked before this fix, since a
+    /// continuously healthy worker's last_health_update never
+    /// advanced regardless of how many real successes it recorded.
     pub fn record_success(&mut self) {
         self.consecutive_failures = 0;
+        self.last_health_update = Instant::now();
         if self.health == WorkerHealth::Degraded {
             self.health = WorkerHealth::Healthy;
-            self.last_health_update = Instant::now();
         }
     }
 
@@ -203,8 +216,16 @@ impl WorkerRegistry {
             .map(|e| e.health)
     }
 
-    /// Mark all workers that have not had a successful routing outcome
-    /// within `timeout` as Unavailable. Used by a periodic health sweep.
+    /// Mark all currently-Healthy workers that have not had a
+    /// successful routing outcome (via record_success) within
+    /// `timeout` as Unavailable. Used by a periodic health sweep.
+    ///
+    /// This comment now accurately describes the check: prior to the
+    /// fix on record_success (see its own doc comment), a
+    /// continuously healthy worker's last_health_update never
+    /// advanced past construction time, so this doc comment's stated
+    /// intent and the code's actual behavior disagreed for exactly
+    /// that case.
     pub fn mark_stale_unavailable(&self, timeout: Duration) {
         let mut workers = self.workers.write().unwrap();
         let now = Instant::now();
@@ -313,5 +334,88 @@ mod tests {
         assert_eq!(WorkerHealth::Healthy.weight_multiplier(), 1.0);
         assert_eq!(WorkerHealth::Degraded.weight_multiplier(), 0.3);
         assert_eq!(WorkerHealth::Unavailable.weight_multiplier(), 0.0);
+    }
+
+    /// Regression test for the real bug: WorkerEntry::record_success
+    /// used to only refresh last_health_update inside the
+    /// Degraded -> Healthy branch, so calling it on an already-Healthy
+    /// worker (the common, correct case) left last_health_update
+    /// frozen at construction time. This test calls record_success
+    /// directly on a WorkerEntry that starts and stays Healthy, and
+    /// checks the timestamp actually moves forward.
+    #[test]
+    fn record_success_refreshes_timestamp_even_when_already_healthy() {
+        let mut entry = WorkerEntry::new(spec("worker-0"));
+        assert_eq!(entry.health, WorkerHealth::Healthy);
+        let initial_ts = entry.last_health_update;
+
+        std::thread::sleep(Duration::from_millis(20));
+        entry.record_success();
+
+        assert_eq!(
+            entry.health,
+            WorkerHealth::Healthy,
+            "a success on an already-Healthy worker must not change its health state"
+        );
+        assert!(
+            entry.last_health_update > initial_ts,
+            "last_health_update must advance on every record_success call, \
+             not just on a Degraded -> Healthy transition"
+        );
+    }
+
+    /// Registry-level counterpart of the test above: a worker that
+    /// keeps receiving real successes, and never degrades, must never
+    /// be flagged stale by mark_stale_unavailable, no matter how long
+    /// it has been Healthy overall. Before the fix, this worker's
+    /// last_health_update was frozen at registration time, so a
+    /// staleness sweep run long after registration (but shortly after
+    /// the worker's most recent real success) would have incorrectly
+    /// marked it Unavailable.
+    #[test]
+    fn continuously_healthy_worker_with_ongoing_successes_is_never_marked_stale() {
+        let registry = WorkerRegistry::new();
+        registry.register(spec("worker-0"));
+
+        // Simulate time passing since registration, during which the
+        // worker has been correctly, repeatedly succeeding.
+        std::thread::sleep(Duration::from_millis(30));
+        registry.record_success("worker-0");
+
+        // A staleness sweep with a timeout shorter than the total time
+        // since registration, but longer than the time since the last
+        // record_success call, must NOT mark this worker stale: the
+        // fix's whole point is that last_health_update tracks the last
+        // real success, not registration time.
+        registry.mark_stale_unavailable(Duration::from_millis(15));
+
+        assert_eq!(
+            registry.health("worker-0"),
+            Some(WorkerHealth::Healthy),
+            "a worker with a recent real success must not be marked stale, \
+             even if a long time has passed since it was first registered"
+        );
+    }
+
+    /// The direct counterpart to the test above: a worker that is
+    /// registered but never receives any success at all must still be
+    /// correctly marked stale once the timeout elapses. This confirms
+    /// the fix does not accidentally disable staleness detection
+    /// entirely; it must still fire for a worker that genuinely never
+    /// succeeds.
+    #[test]
+    fn worker_with_no_successes_is_still_correctly_marked_stale() {
+        let registry = WorkerRegistry::new();
+        registry.register(spec("worker-0"));
+
+        std::thread::sleep(Duration::from_millis(20));
+        registry.mark_stale_unavailable(Duration::from_millis(5));
+
+        assert_eq!(
+            registry.health("worker-0"),
+            Some(WorkerHealth::Unavailable),
+            "a worker that never had a successful routing outcome must \
+             still be marked stale once the timeout elapses"
+        );
     }
 }

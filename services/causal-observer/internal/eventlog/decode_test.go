@@ -253,3 +253,67 @@ func TestDecodeReplayEvent_RefusesUnreasonablyLargeLengthPrefix(t *testing.T) {
 		t.Fatal("expected an error for an unreasonably large length prefix, got nil")
 	}
 }
+
+// TestDecodeReplayEvent_RefusesUnreasonablyLargeDependencyCount is the
+// regression test for the bug the maxReasonableDependencyCount bound
+// fixes: depCount is read via readU64() directly, bypassing
+// readBytes() and the maxReasonableFieldBytes guard above entirely,
+// so it needed its own, separate bound and its own, separate test.
+// Before this fix, this exact byte sequence would attempt
+// make([][16]byte, 1<<32), a 64 GiB allocation, and most likely panic
+// the whole process instead of returning a clean error.
+func TestDecodeReplayEvent_RefusesUnreasonablyLargeDependencyCount(t *testing.T) {
+	var buf bytes.Buffer
+	var u64buf [8]byte
+	binary.LittleEndian.PutUint64(u64buf[:], 1) // lamport_ts
+	buf.Write(u64buf[:])
+	buf.Write(make([]byte, 16))                     // event_id
+	binary.LittleEndian.PutUint64(u64buf[:], 1<<32) // absurd dependency count
+	buf.Write(u64buf[:])
+
+	_, err := DecodeReplayEvent(bytes.NewReader(buf.Bytes()))
+	if err == nil {
+		t.Fatal("expected an error for an unreasonably large dependency count, got nil")
+	}
+}
+
+// TestDecodeReplayEvent_DependencyCountAtBoundIsAccepted confirms the
+// fix does not reject legitimate data: exactly
+// maxReasonableDependencyCount dependency IDs must still decode
+// successfully. This is the counterpart to the test above; a cap that
+// only ever errors would be trivially "passing" without actually
+// proving the real, legitimate case still works.
+func TestDecodeReplayEvent_DependencyCountAtBoundIsAccepted(t *testing.T) {
+	depIDs := make([][16]byte, maxReasonableDependencyCount)
+	for i := range depIDs {
+		depIDs[i] = [16]byte{byte(i)}
+	}
+	raw := buildBincodeReplayEvent(1, [16]byte{}, depIDs, "node", []byte("p"))
+
+	event, err := DecodeReplayEvent(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("DecodeReplayEvent failed at the exact bound: %v", err)
+	}
+	if len(event.DependencyIDs) != maxReasonableDependencyCount {
+		t.Errorf("DependencyIDs count = %d, want %d", len(event.DependencyIDs), maxReasonableDependencyCount)
+	}
+}
+
+// TestDecodeReplayEvent_DependencyCountOneBeyondBoundIsRejected pins
+// down the exact boundary: one more than the cap must fail, proving
+// the check is ">" against the real constant, not an off-by-one
+// approximation of it.
+func TestDecodeReplayEvent_DependencyCountOneBeyondBoundIsRejected(t *testing.T) {
+	var buf bytes.Buffer
+	var u64buf [8]byte
+	binary.LittleEndian.PutUint64(u64buf[:], 1)
+	buf.Write(u64buf[:])
+	buf.Write(make([]byte, 16))
+	binary.LittleEndian.PutUint64(u64buf[:], maxReasonableDependencyCount+1)
+	buf.Write(u64buf[:])
+
+	_, err := DecodeReplayEvent(bytes.NewReader(buf.Bytes()))
+	if err == nil {
+		t.Fatal("expected an error one past the dependency count bound, got nil")
+	}
+}

@@ -119,6 +119,30 @@ func (br *byteReader) readU128() [16]byte {
 // still catching genuinely corrupted/misaligned reads.
 const maxReasonableFieldBytes = 64 * 1024 * 1024
 
+// maxReasonableDependencyCount bounds ReplayEvent.DependencyIDs'
+// element count before make([][16]byte, depCount) allocates for it.
+// depCount is read via readU64() directly in DecodeReplayEvent below,
+// bypassing readBytes() and its maxReasonableFieldBytes guard
+// entirely, so it is subject to the exact same failure mode that
+// guard exists to prevent: a schema mismatch or misaligned read
+// yielding a garbage uint64, which here would attempt to allocate up
+// to depCount*16 bytes and likely panic (OOM) on one malformed event.
+//
+// The bound below is set from the real, verified usage of
+// dependency_ids in this codebase, not a guess: the only call site
+// that constructs a ReplayEvent's dependencies is
+// crates/stratum-router/src/router.rs's route_and_log, which always
+// passes vec![ingress_event_id], a single element (verified directly
+// against that source; grep for ".append(" in stratum-router turns up
+// exactly one call site). 64 gives comfortable headroom for a future
+// event kind with a handful of real causal parents, while still
+// catching a schema mismatch or corrupted read by many orders of
+// magnitude. If a real use case for more dependencies per event is
+// added later, raise this deliberately alongside that change, with
+// the same kind of verified justification, not by picking a larger
+// round number preemptively.
+const maxReasonableDependencyCount = 64
+
 func (br *byteReader) readBytes() []byte {
 	length := br.readU64()
 	if br.err != nil {
@@ -157,6 +181,14 @@ func DecodeReplayEvent(r io.Reader) (ReplayEvent, error) {
 	event.EventID = br.readU128()
 
 	depCount := br.readU64()
+	if br.err == nil && depCount > maxReasonableDependencyCount {
+		br.err = fmt.Errorf(
+			"refusing to allocate %d dependency IDs (max %d): "+
+				"almost certainly a schema mismatch or corrupted read, "+
+				"not a real event with this many causal dependencies",
+			depCount, maxReasonableDependencyCount,
+		)
+	}
 	if br.err == nil {
 		event.DependencyIDs = make([][16]byte, depCount)
 		for i := uint64(0); i < depCount; i++ {

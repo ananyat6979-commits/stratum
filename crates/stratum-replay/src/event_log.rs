@@ -86,7 +86,7 @@ impl std::fmt::Display for EventLogError {
             ),
             Self::LogNotFound(path) => write!(
                 f,
-                "event log not found at {path} -- refusing to silently create a new, \
+                "event log not found at {path}, refusing to silently create a new, \
                  empty log; use AppendOnlyEventLog::open() instead if creating a new \
                  log was actually intended"
             ),
@@ -152,7 +152,7 @@ impl AppendOnlyEventLog {
     /// analysis) but passed a slightly wrong relative path got no
     /// error, just a silently empty result indistinguishable from "this
     /// log genuinely has zero events." Confirmed as a real, live bug:
-    /// `dump_events --path ..\..\benchmarks\harness\gw_sem_phase2full.redb`
+    /// `dump_events path ..\..\benchmarks\harness\gw_sem_phase2full.redb`
     /// from `crates/stratum-replay`, run against a real, populated
     /// event log from an actual 2000-observation benchmark run,
     /// silently created a brand-new empty file at that path (both
@@ -259,17 +259,48 @@ impl AppendOnlyEventLog {
         Ok(events)
     }
 
-    /// Load events in the Lamport timestamp range [start_ts, end_ts].
+    /// Load events in the Lamport timestamp range [start_ts, end_ts]
+    /// (inclusive on both ends).
+    ///
+    /// # A real bug this fixed
+    /// Previously called `load_all()` (deserializing every event in
+    /// the entire log) and filtered the resulting Vec in memory. This
+    /// is O(n) in the TOTAL size of the log on every call, regardless
+    /// of how narrow the requested range is, even though the table's
+    /// key, `(u64, u128)` with `lamport_ts` first (see this module's
+    /// doc comment: "Ordered by (lamport_ts ASC, event_id ASC)
+    /// automatically"), was deliberately chosen to make a real,
+    /// bounded range scan possible via redb's own `Table::range`. The
+    /// schema was built for the fast path and this function simply
+    /// wasn't using it. For a replay session pulling a narrow window
+    /// out of a long-lived, large event log, this was the difference
+    /// between touching a handful of keys and deserializing the whole
+    /// log on every call.
+    ///
+    /// `event_id` is `u128`, so the range bound on the key's second
+    /// component spans its full domain (`u128::MIN..=u128::MAX`): a
+    /// range query bounded only on `lamport_ts` must not accidentally
+    /// exclude a real event at `start_ts` or `end_ts` whose
+    /// `event_id` happens to sort outside some arbitrarily chosen
+    /// narrower bound.
     pub fn load_range(
         &self,
         start_ts: u64,
         end_ts: u64,
     ) -> Result<Vec<ReplayEvent>, EventLogError> {
-        Ok(self
-            .load_all()?
-            .into_iter()
-            .filter(|e| e.lamport_ts >= start_ts && e.lamport_ts <= end_ts)
-            .collect())
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(EVENTS)?;
+
+        let range_start = (start_ts, u128::MIN);
+        let range_end = (end_ts, u128::MAX);
+
+        let mut events = Vec::new();
+        for result in table.range(range_start..=range_end)? {
+            let (_key, value) = result?;
+            let event: ReplayEvent = deserialize(value.value())?;
+            events.push(event);
+        }
+        Ok(events)
     }
 
     /// Return the total number of events in the log.
@@ -360,6 +391,74 @@ mod tests {
         assert_eq!(range.len(), 3);
         assert_eq!(range[0].lamport_ts, ts_4);
         assert_eq!(range[2].lamport_ts, ts_6);
+    }
+
+    /// Regression test for the real bug: `load_range` used to call
+    /// `load_all()` and filter in memory, so it deserialized every
+    /// event in the log on every call, regardless of the requested
+    /// range's width. `load_range_filters_correctly` above checks only
+    /// output correctness and passes identically whether `load_range`
+    /// is implemented as a native range scan or as `load_all` plus a
+    /// filter, so it cannot tell the two implementations apart on its
+    /// own; this test can, because it deliberately corrupts the raw
+    /// bytes of events OUTSIDE the requested range at the storage
+    /// layer. A `load_all()`-based implementation must deserialize
+    /// those corrupted bytes too (since it reads the whole table
+    /// before filtering) and would return `Err`, whereas a real range
+    /// scan never reads them and succeeds.
+    #[test]
+    fn load_range_only_touches_keys_in_range_not_the_whole_table() {
+        let path = temp_log_path();
+        let log = AppendOnlyEventLog::open(&path, "node-0").unwrap();
+        for i in 0..10u128 {
+            log.append(i, vec![], format!("p{i}").into_bytes()).unwrap();
+        }
+        let all = log.load_all().unwrap();
+        let ts_4 = all[4].lamport_ts;
+        let ts_6 = all[6].lamport_ts;
+
+        // Corrupt the stored value bytes for every event OUTSIDE
+        // [ts_4, ts_6] directly at the redb storage layer, bypassing
+        // this module's own serialize()/append() entirely, so a
+        // correct range scan of [ts_4, ts_6] never reads these keys
+        // at all, while load_all() would read every one of them.
+        {
+            let write_txn = log.db.begin_write().unwrap();
+            {
+                let mut table = write_txn.open_table(EVENTS).unwrap();
+                for event in &all {
+                    if event.lamport_ts < ts_4 || event.lamport_ts > ts_6 {
+                        table
+                            .insert(
+                                (event.lamport_ts, event.event_id),
+                                b"THIS IS NOT VALID BINCODE".as_slice(),
+                            )
+                            .unwrap();
+                    }
+                }
+            }
+            write_txn.commit().unwrap();
+        }
+
+        // A real range scan must succeed: it never touches the
+        // corrupted keys outside [ts_4, ts_6].
+        let range = log.load_range(ts_4, ts_6).unwrap();
+        assert_eq!(range.len(), 3);
+        assert_eq!(range[0].lamport_ts, ts_4);
+        assert_eq!(range[2].lamport_ts, ts_6);
+
+        // Sanity check that the corruption above is real and would
+        // actually be detected: load_all() (which does read
+        // everything) must now fail on the corrupted keys. If this
+        // assertion doesn't hold, the corruption step above didn't do
+        // anything, and the test above isn't actually proving anything.
+        assert!(
+            log.load_all().is_err(),
+            "expected load_all() to fail on the deliberately corrupted \
+             out-of-range keys; if it succeeds, this test's corruption \
+             step is not working and load_range_only_touches_keys_in_range \
+             is not actually distinguishing a range scan from a full scan"
+        );
     }
 
     #[test]

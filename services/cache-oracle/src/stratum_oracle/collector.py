@@ -7,8 +7,8 @@ Feeds the extracted values into KvPressurePredictor instances.
 METRIC DISCOVERY
 ================
 vLLM exposes:
-  vllm:gpu_cache_usage_perc  -- fraction of KV cache blocks in use
-  vllm:num_preemptions_total -- cumulative preemptions (eviction indicator)
+  vllm:gpu_cache_usage_perc: fraction of KV cache blocks in use
+  vllm:num_preemptions_total: cumulative preemptions (eviction indicator)
 
 Ollama (our Phase 2/3 backend) does not expose KV cache metrics natively.
 For Ollama workers, we use a synthetic utilization estimate based on
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 SCRAPE_INTERVAL_S = 15
 SCRAPE_TIMEOUT_S = 5.0
 METRIC_NAME_VLLM = "vllm:gpu_cache_usage_perc"
-METRIC_NAME_OLLAMA_PROXY = "stratum_ollama_kv_proxy_utilization"
+
 
 
 @dataclass
@@ -48,7 +48,7 @@ class WorkerMetrics:
     worker_id: str
     address: str
     kv_utilization: float          # [0.0, 1.0]
-    predicted_utilization: float   # [0.0, 1.0] — 100ms ahead
+    predicted_utilization: float   # [0.0, 1.0]: 100ms ahead
     last_scrape_time: float        # Unix timestamp
     scrape_success: bool
     backend_type: str              # "vllm" | "ollama"
@@ -118,7 +118,7 @@ class MetricsCollector:
 
         Returns 0.0 (no pressure assumed) if the worker hasn't been
         scraped yet or if the predictor isn't warmed up.
-        This is the safe default — it prevents over-steering away from
+        This is the safe default: it prevents over-steering away from
         workers before we have data.
         """
         predictor = self._predictors.get(worker_id)
@@ -148,8 +148,44 @@ class MetricsCollector:
         address: str,
         backend_type: str,
     ) -> None:
+        # Conservative fallback value used when a scrape genuinely
+        # fails (connection refused, timeout, malformed response).
+        # This must be high, not 0.0: 0.0 reads as "empty, healthy
+        # cache" to KvPressurePredictor and the router, which is the
+        # opposite of what an unreachable worker should signal.
+        HIGH_PRESSURE_ON_SCRAPE_FAILURE = 1.0
+
         try:
             utilization = await self._fetch_utilization(client, address, backend_type)
+
+            if utilization is None:
+                # The scrape failed. This is the fix for the real bug:
+                # previously, a failure inside _fetch_ollama_utilization
+                # was silently converted to a clean-looking 0.0 before
+                # it ever reached this function, so this method's own
+                # except block below (with the "record as high
+                # pressure" comment) never actually ran for that
+                # failure mode. Handling None explicitly here closes
+                # that gap without relying on an exception to propagate.
+                logger.warning(
+                    "Worker %s: scrape returned no data, recording as "
+                    "high pressure (%.1f) instead of a clean reading",
+                    worker_id, HIGH_PRESSURE_ON_SCRAPE_FAILURE,
+                )
+                predictor = self._predictors[worker_id]
+                predictor.update(HIGH_PRESSURE_ON_SCRAPE_FAILURE)
+                predicted = predictor.predict()
+                self._metrics[worker_id] = WorkerMetrics(
+                    worker_id=worker_id,
+                    address=address,
+                    kv_utilization=HIGH_PRESSURE_ON_SCRAPE_FAILURE,
+                    predicted_utilization=predicted,
+                    last_scrape_time=time.time(),
+                    scrape_success=False,
+                    backend_type=backend_type,
+                )
+                return
+
             predictor = self._predictors[worker_id]
             predictor.update(utilization)
             predicted = predictor.predict()
@@ -170,8 +206,12 @@ class MetricsCollector:
             )
 
         except Exception as e:
+            # Genuinely unexpected failures not already converted to
+            # None by the fetch layer (e.g. a bug in the predictor
+            # itself) still land here, with the same conservative
+            # fallback: keep the last known-good utilization, mark
+            # scrape_success=False.
             logger.warning("Failed to scrape worker %s: %s", worker_id, e)
-            # On scrape failure, record as high pressure (conservative)
             if worker_id in self._metrics:
                 existing = self._metrics[worker_id]
                 self._metrics[worker_id] = WorkerMetrics(
@@ -189,7 +229,13 @@ class MetricsCollector:
         client: httpx.AsyncClient,
         address: str,
         backend_type: str,
-    ) -> float:
+    ) -> Optional[float]:
+        """
+        Returns None when the underlying scrape failed. The caller,
+        _scrape_worker, must treat None as a failed scrape and record
+        conservative high pressure, never substitute it with a clean
+        successful reading.
+        """
         if backend_type == "vllm":
             return await self._fetch_vllm_utilization(client, address)
         else:
@@ -216,7 +262,7 @@ class MetricsCollector:
         self,
         client: httpx.AsyncClient,
         address: str,
-    ) -> float:
+    ) -> Optional[float]:
         """
         Estimate KV utilization from Ollama's /api/ps endpoint.
 
@@ -224,7 +270,16 @@ class MetricsCollector:
         ratio of in-use model memory to total model memory as a proxy.
         This correlates with KV cache pressure but is not equivalent.
 
-        Returns 0.0 if Ollama is idle (no models loaded).
+        Returns 0.0 only when Ollama responded successfully and reports
+        zero loaded models. This is a real, legitimate zero: the worker
+        is idle, not broken.
+
+        Returns None when the scrape itself failed: connection refused,
+        timeout, non-2xx status, or a malformed response. None is not
+        a utilization value and must never be substituted with 0.0 by
+        the caller. A 0.0 here is indistinguishable, downstream, from
+        "this worker is empty and perfectly healthy", exactly the
+        wrong signal for a worker that is actually unreachable.
         """
         try:
             response = await client.get(f"{address}/api/ps")
@@ -233,10 +288,13 @@ class MetricsCollector:
             models = data.get("models", [])
             if not models:
                 return 0.0
-            # Use the first loaded model's size_vram as proxy
-            # Normalize by a conservative max (8GB for laptop hardware)
+            # Sum size_vram across every currently loaded model, not
+            # just one. Multiple models can be resident in Ollama at
+            # once, and pressure should reflect total VRAM committed,
+            # not an arbitrary single model's share of it.
             max_vram_bytes = 8 * 1024 * 1024 * 1024
             total_vram = sum(m.get("size_vram", 0) for m in models)
             return min(1.0, total_vram / max_vram_bytes)
-        except Exception:
-            return 0.0
+        except Exception as e:
+            logger.warning("Ollama scrape failed for %s: %s", address, e)
+            return None

@@ -283,3 +283,75 @@ documented finding that this configuration's tolerance bands needed
 correcting against real Monte Carlo measurement before being trusted
 (the same discipline `test_msprt_type1_error.py` established for
 `msprt.py` itself, applied here to a downstream user of it).
+
+
+## 2026-08-31 audit: bug fixes and methodology review
+
+An independent code audit reviewed both the implementation supporting
+the Phase 2 experiment and the experiment's own statistical design.
+Four real bugs were found in supporting code, fixed, tested, and
+recorded in ADR-010 through ADR-012. None of the four are in the
+statistical core, `msprt.py`, or in `phase2_runner.py`'s own pairing
+and interleaving logic, which were checked separately, below.
+
+### Was the paired design actually paired
+
+Confirmed directly against `phase2_runner.py`. Both arms of every pair
+are built from a single shared request body, same model, phi3 colon
+mini, same max_tokens, same prompt, constructed once per pair, not
+independently. The order the two requests are sent in alternates per
+pair specifically to avoid one arm structurally benefiting from always
+running second against a freshly warmed backend. This satisfies the
+audit's own checklist for a genuinely paired, controlled comparison,
+not two independently sampled populations compared after the fact.
+
+### Was the noise figure real and correctly used
+
+The final committed checkpoint, phase2 full run dot json, stores
+`sigma_squared` equal to 915.92, which is exactly two times 21.4
+squared, matching the per arm standard deviation of 21.4 seconds that
+was supplied as the `--sigma` argument to the runner. That value came
+from a 20 pair real Ollama pilot run, not from the full 2000 pair
+dataset's own empirical spread, since mSPRT's checkpoint deliberately
+retains only the two sufficient statistics it needs, a running count
+and a running sum of differences, not the full observation history.
+This means the true empirical variance of the complete run cannot be
+reconstructed after the fact from the committed checkpoint alone. This
+is a real, honest limitation, not previously stated this plainly.
+
+### Was minus zero point four one seconds distinguishable from noise
+
+Computed directly from the final checkpoint. Mean difference equals
+sum_d divided by n, minus 0.4066 seconds. Using the test's own assumed
+variance, the standard error of that mean at n equals 2000 is 0.6767
+seconds. The observed mean sits at minus 0.60 standard errors from
+zero. The resulting 95 percent interval is approximately minus 1.73 to
+plus 0.92 seconds, which comfortably contains zero. This is a second,
+independent way of expressing what the e-value of 0.160 against a
+threshold of 20 already said, and it agrees. The observed effect is
+not distinguishable from noise at this sample size. It is not close to
+the edge of distinguishability, it sits well inside the range a true
+zero effect would routinely produce.
+
+### Should this be re-run with GPU compute, for example on Kaggle
+
+No, and the reason is structural, not a matter of convenience. The
+documented severity of this machine's latency variance is attributed
+elsewhere in this project, skills dot md and benchmarks README dot md,
+to CPU bound inference contending with an uncontrolled, shared,
+multi-process development machine, not to insufficient compute. A GPU
+would shrink raw inference time, but does little on its own to shrink
+variance caused by an uncontrolled environment, unless the replacement
+environment is also genuinely quieter, which is a property of
+isolation, not of having a GPU. Kaggle's free tier notebooks run on
+shared, ephemeral infrastructure with roughly nine to twelve hour
+session limits, which is structurally incompatible with this
+experiment's actual design, an eleven day, checkpointed, resumable run
+built specifically because no free tier platform can host a multi day
+persistent service. If this experiment is repeated, the higher
+leverage steps, in order, are re-estimating sigma from the full run's
+real per pair data rather than the pilot estimate, and running on a
+dedicated, otherwise idle machine for the duration, neither of which
+requires new hardware spend. A GPU is a secondary consideration that
+would only plausibly matter if a meaningfully smaller target effect
+were being chased.

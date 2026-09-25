@@ -1,4 +1,4 @@
-# RFC-001: Causal Observability — CausalDecisionEvent and the Replay Event Log
+# RFC-001: Causal Observability: CausalDecisionEvent and the Replay Event Log
 
 **Status**: Accepted
 **Date**: 2026-06-19
@@ -64,7 +64,7 @@ message CausalDecisionEvent {
 message RequestIngressEvent {
   string replay_key = 1;
   InferenceRequest request = 2;
-  // Wall clock at ingress -- preserved for reference, NOT used during replay
+  // Wall clock at ingress: preserved for reference, NOT used during replay
   int64 ingress_wall_clock_ns = 3;
 }
 
@@ -104,7 +104,7 @@ message RoutingScoreWeights {
 message InferenceResponseEvent {
   string replay_key = 1;
   string worker_id = 2;
-  // Recorded verbatim -- during replay, model calls are replaced with
+  // Recorded verbatim: during replay, model calls are replaced with
   // a mock that serves this recorded response.
   bytes response_bytes = 3;
   double ttft_ms = 4;
@@ -129,7 +129,7 @@ The implication of the last row: replay produces identical routing
 decisions but does not reproduce the exact wall-clock interleaving of
 concurrent requests. For debugging routing logic, this is sufficient.
 For debugging scheduler concurrency bugs, hardware-level event recording
-would be required — outside STRATUM's scope.
+would be required, outside STRATUM's scope.
 
 ## Event Log Design
 
@@ -201,3 +201,21 @@ tolerance threshold.
    Phase 2 implements routing-decision replay only. Full lifecycle replay
    (including mock model responses) is Phase 2 stretch goal, moved to
    Phase 3 if time-constrained.
+
+
+## 2026-08-31 status update
+
+An independent code audit of the pipeline this RFC describes found
+four real bugs, none of them in the causal event schema this RFC is
+primarily about, but all of them in supporting infrastructure the
+schema's own consumers depend on for correctness. See ADR-010 through
+ADR-012 for the individual fixes, and docs/SCOPE.md's audit section
+for the full context.
+
+The gap between this RFC's original design and what is actually
+implemented, `RoutingDecisionPayload` as a smaller, real subset of the
+originally described `CausalDecisionEvent`, remains open and is
+tracked in docs/SCOPE.md, not restated here. This update is narrower,
+it records that the infrastructure now underneath the smaller,
+implemented version was itself independently checked and corrected,
+which the original RFC draft did not anticipate as a separate concern.
